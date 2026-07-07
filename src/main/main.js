@@ -2,7 +2,7 @@
 // Electron main process: owns MANY agent Sessions (one per chat in the sidebar),
 // persists each to disk, and bridges them to the renderer over IPC — including the
 // approval round-trip that gates mutating tool calls.
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
@@ -48,6 +48,7 @@ function newId() { return Date.now().toString(36) + Math.random().toString(36).s
 function metaOf(rec) {
   return {
     id: rec.id, title: rec.title, cwd: rec.cwd, model: rec.model, mode: rec.mode,
+    effort: rec.effort || null,
     createdAt: rec.createdAt, updatedAt: rec.updatedAt, usage: rec.usage,
     streaming: !!rec.abort,
   };
@@ -59,6 +60,7 @@ function saveSession(rec) {
     fs.writeFileSync(sessionFile(rec.id), JSON.stringify({
       meta: {
         id: rec.id, title: rec.title, cwd: rec.cwd, model: rec.model, mode: rec.mode,
+        effort: rec.effort || null,
         createdAt: rec.createdAt, updatedAt: rec.updatedAt, usage: rec.usage,
       },
       messages: rec.agent ? rec.agent.messages : (rec.savedMessages || []),
@@ -163,6 +165,7 @@ function foldEvent(rec, e) {
     if (e.usage) {
       rec.usage.prompt_tokens += e.usage.prompt_tokens || 0;
       rec.usage.completion_tokens += e.usage.completion_tokens || 0;
+      if (e.usage.last_prompt) rec.usage.context = e.usage.last_prompt;   // ≈ current context size
       const p = priceOf(rec.model);
       if (p) rec.usage.cost += (e.usage.prompt_tokens || 0) * p.prompt + (e.usage.completion_tokens || 0) * p.completion;
       rec.transcript.push({ t: 'note', text: 'done · ~' + ((e.usage.prompt_tokens || 0) + (e.usage.completion_tokens || 0)).toLocaleString() + ' tokens' });
@@ -182,7 +185,7 @@ function ensureAgent(rec) {
   const cfg = loadConfig();
   if (!rec.agent) {
     rec.agent = new Session({
-      apiKey: cfg.apiKey, model: rec.model, cwd: rec.cwd, mode: rec.mode,
+      apiKey: cfg.apiKey, model: rec.model, cwd: rec.cwd, mode: rec.mode, effort: rec.effort || null,
       emit: (e) => onAgentEvent(rec, e),
       approve: (kind, detail, opts = {}) => new Promise((resolve) => {
         const aid = ++approvalSeq;
@@ -201,7 +204,8 @@ function ensureAgent(rec) {
 function createWindow() {
   win = new BrowserWindow({
     width: 1360, height: 860, minWidth: 860, minHeight: 520,
-    titleBarStyle: 'hiddenInset', backgroundColor: '#161619',
+    titleBarStyle: 'hiddenInset',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#161619' : '#f4f4f2',
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, webviewTag: true },
   });
   win.loadFile(path.join(__dirname, '../renderer/index.html'));
@@ -338,6 +342,65 @@ ipcMain.handle('file-read', (_e, { id, rel }) => {
   } catch (e) { return { error: String((e && e.message) || e) }; }
 });
 
+// ---- OpenRouter credits (for the usage popover), cached 60s -----------------------
+let creditsCache = { at: 0, data: null };
+ipcMain.handle('credits', () => {
+  if (Date.now() - creditsCache.at < 60000 && creditsCache.data) return creditsCache.data;
+  const cfg = loadConfig();
+  if (!cfg.apiKey) return null;
+  return new Promise((resolve) => {
+    const req = https.request({
+      method: 'GET', hostname: 'openrouter.ai', path: '/api/v1/credits',
+      headers: { 'Authorization': 'Bearer ' + cfg.apiKey, 'Accept': 'application/json' },
+    }, (res) => {
+      let b = '';
+      res.on('data', (c) => (b += c));
+      res.on('end', () => {
+        try {
+          const d = JSON.parse(b).data || {};
+          creditsCache = { at: Date.now(), data: { total: d.total_credits, used: d.total_usage } };
+          resolve(creditsCache.data);
+        } catch { resolve(null); }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.end();
+  });
+});
+
+// ---- attach files/photos from the + menu ------------------------------------------
+const IMG_EXT = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
+const IMG_MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
+ipcMain.handle('pick-files', async (_e, id) => {
+  const rec = sessions.get(id);
+  const r = await dialog.showOpenDialog(win, { properties: ['openFile', 'multiSelections'] });
+  if (r.canceled) return [];
+  return r.filePaths.slice(0, 8).map((p) => {
+    const ext = path.extname(p).toLowerCase();
+    if (IMG_EXT.includes(ext)) {
+      try {
+        const buf = fs.readFileSync(p);
+        if (buf.length <= 6 * 1024 * 1024) {
+          return { kind: 'image', name: path.basename(p), dataUrl: 'data:' + IMG_MIME[ext] + ';base64,' + buf.toString('base64') };
+        }
+        return { kind: 'error', name: path.basename(p), error: 'image over 6 MB' };
+      } catch (e) { return { kind: 'error', name: path.basename(p), error: String(e.message || e) }; }
+    }
+    // Non-image: hand back a path to @-mention (relative if inside the session cwd).
+    let rel = p;
+    if (rec) { const rp = path.relative(rec.cwd, p); if (!rp.startsWith('..') && !path.isAbsolute(rp)) rel = rp; }
+    return { kind: 'path', name: path.basename(p), path: rel };
+  });
+});
+ipcMain.handle('pick-folder-path', async (_e, id) => {
+  const rec = sessions.get(id);
+  const r = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
+  if (r.canceled || !r.filePaths[0]) return null;
+  let p = r.filePaths[0];
+  if (rec) { const rp = path.relative(rec.cwd, p); if (!rp.startsWith('..') && !path.isAbsolute(rp)) p = rp; }
+  return p;
+});
+
 // ---- "Open in …" ------------------------------------------------------------------
 ipcMain.handle('open-in', (_e, { id, target }) => {
   const rec = sessions.get(id);
@@ -414,17 +477,19 @@ ipcMain.handle('session-config', (_e, { id, patch }) => {
     if (!patch.mode && cfg.modeByModel[patch.model]) rec.mode = cfg.modeByModel[patch.model];
   }
   if (patch.cwd) { rec.cwd = patch.cwd; cfg.cwd = patch.cwd; }
+  if (patch.effort !== undefined) rec.effort = patch.effort || null;
   saveConfig(cfg);
   if (rec.agent) {
     if (patch.model) rec.agent.setModel(rec.model);
     rec.agent.setMode(rec.mode);
     if (patch.cwd) rec.agent.setCwd(rec.cwd);
+    if (patch.effort !== undefined) rec.agent.setEffort(rec.effort);
   }
   saveSession(rec);
   return metaOf(rec);
 });
 
-ipcMain.handle('session-send', (_e, { id, text }) => {
+ipcMain.handle('session-send', (_e, { id, text, images }) => {
   const rec = sessions.get(id);
   if (!rec) return { ok: false, error: 'no such session' };
   const cfg = loadConfig();
@@ -437,13 +502,14 @@ ipcMain.handle('session-send', (_e, { id, text }) => {
     rec.title = text.split('\n')[0].slice(0, 48) || 'New chat';
     sessionsChanged();
   }
-  rec.transcript.push({ t: 'user', text });
+  rec.transcript.push({ t: 'user', text, images: images && images.length ? images.length : 0 });
   rec.updatedAt = Date.now();
   const agent = ensureAgent(rec);
   rec.abort = new AbortController();
   sessionsChanged();
+  const payload = images && images.length ? { text, images } : text;
   (async () => {
-    try { await agent.send(text, rec.abort.signal); }
+    try { await agent.send(payload, rec.abort.signal); }
     catch (err) { onAgentEvent(rec, { type: 'error', message: String((err && err.message) || err) }); }
     finally { rec.abort = null; saveSession(rec); sessionsChanged(); }
   })();

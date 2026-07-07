@@ -15,12 +15,15 @@ Built from scratch (a real agent loop, not a wrapper). Electron GUI + a zero-dep
 - **Run & Preview** (▷) — start a dev server (suggestions from package.json scripts); its URL is auto-detected (logs + port probing) and loads in an embedded **live preview** with a URL bar.
 - **Background tasks** — a process manager for dev servers/watchers: live logs, running badge, stop kills the whole process tree.
 - **Files panel** (⇧⌘F) — lazy project tree with read-only file preview. **⋮ menu**: Open in Finder / Terminal / VS Code, sessions folder.
-- **Permission modes** per session — 📋 Plan (read-only) / 🔨 Ask (approve everything) / ⚡ Auto (auto-approve routine work). A **destructive-action guard** (rm, resets, overwrites, sudo…) always stops and asks, even in Auto. Per-model trust memory: each model remembers the mode you last used with it.
+- **Five permission modes** per session, picked from a menu on the mode pill (1–5): 📋 Plan (read-only) / 🔨 Manual (approve everything) / ✎ Accept edits (file edits auto-approve, bash asks) / ⚡ Auto (routine work auto-approves) / ⚠ Bypass (everything auto-approves). The **destructive-action guard** (rm, resets, overwrites, sudo…) stops and asks in every mode except Bypass. Per-model trust memory: each model remembers the mode you last used with it.
 - **@-file mentions** with fuzzy autocomplete, **slash commands** (`/model`, `/mode`, `/dir`, `/clear`, `/compact`, `/rename`, `/diff`, `/help`).
 - **/compact** — summarize the session and compress the context, Claude Code style.
 - **Message queueing** — type while the agent is working; messages send when the turn ends.
 - **Model picker** (⌘K) — the full OpenRouter catalog (300+), searchable, with pricing and context length, cached for instant open. Type any model id, including ones not in the list.
-- **Token + cost meter** per session.
+- **＋ attach menu** (⌘U) — add photos (sent to vision models as real image input), files (inserted as @mentions), or a folder; jump to slash commands.
+- **Reasoning effort selector** — faster ↔ smarter per session (OpenRouter unified `reasoning.effort`).
+- **Context & usage popover** — click the token meter: context-window fill bar for the current model, session cost, and your live OpenRouter credit balance.
+- **Monochrome UI, light & dark** — follows the system theme.
 - **Keyboard-first** — ⌘N new chat, ⌘K models, ⌘B sidebar, ⌘D changes panel, ⌘1–9 switch session, ⇧Tab cycle mode, Enter/Esc approve/deny, Esc stop.
 
 ## Run

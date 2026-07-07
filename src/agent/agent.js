@@ -14,13 +14,15 @@ class Session {
     this.baseUrl = opts.baseUrl;
     this.model = opts.model;
     this.cwd = opts.cwd;
-    this.mode = opts.mode || 'ask';           // 'plan' (read-only) | 'ask' (approve) | 'auto' (bypass)
+    this.mode = opts.mode || 'ask';           // 'plan' | 'ask' | 'edits' | 'auto' | 'bypass'
+    this.effort = opts.effort || null;        // null (model default) | 'low' | 'medium' | 'high'
     this.emit = opts.emit || (() => {});      // (event) => void
     this.approve = opts.approve || (async () => true);
     this.messages = [{ role: 'system', content: systemPrompt(this.cwd, this.mode) }];
   }
 
   setModel(m) { this.model = m; }
+  setEffort(e) { this.effort = e || null; }
   setMode(m) { this.mode = m; this.messages[0] = { role: 'system', content: systemPrompt(this.cwd, this.mode) }; }
   setCwd(d) { this.cwd = d; this.messages[0] = { role: 'system', content: systemPrompt(this.cwd, this.mode) }; }
 
@@ -55,19 +57,34 @@ class Session {
     return summary;
   }
 
-  async send(userText, signal) {
-    this.messages.push({ role: 'user', content: userText });
+  async send(userInput, signal) {
+    // userInput: string, or { text, images: [dataUrl] } for vision models.
+    let content = userInput;
+    if (typeof userInput === 'object' && userInput !== null) {
+      content = (userInput.images && userInput.images.length)
+        ? [{ type: 'text', text: userInput.text || '' },
+           ...userInput.images.map((u) => ({ type: 'image_url', image_url: { url: u } }))]
+        : (userInput.text || '');
+    }
+    this.messages.push({ role: 'user', content });
     const { tools, schemas } = makeTools({
       cwd: this.cwd,
       approve: (kind, detail, opts = {}) => {
         if (this.mode === 'plan') return Promise.resolve(false);   // plan = read-only
-        // Auto (bypass) auto-approves routine work — but destructive actions ALWAYS
-        // stop and ask, so a trusted model still can't wreck your good files.
-        if (this.mode === 'auto' && !opts.danger) {
+        // Trust ladder: bypass auto-approves EVERYTHING (including destructive);
+        // auto approves routine work but destructive always asks; edits approves
+        // only file writes/edits (bash + destructive still ask); ask approves nothing.
+        const danger = !!opts.danger;
+        const autoOk =
+          this.mode === 'bypass' ? true
+          : this.mode === 'auto' ? !danger
+          : this.mode === 'edits' ? (!danger && (kind === 'write' || kind === 'edit'))
+          : false;
+        if (autoOk) {
           this.emit({ type: 'auto_approved', kind, detail });
           return Promise.resolve(true);
         }
-        this.emit({ type: 'approval_request', kind, detail, danger: !!opts.danger });
+        this.emit({ type: 'approval_request', kind, detail, danger });
         return this.approve(kind, detail, opts);
       },
       onDiff: (file, before, after) => this.emit({ type: 'diff', file, before, after }),
@@ -77,7 +94,7 @@ class Session {
       ? schemas.filter((s) => ['read_file', 'list_dir', 'glob', 'grep'].includes(s.function.name))
       : schemas;
 
-    let usageTotal = { prompt_tokens: 0, completion_tokens: 0 };
+    let usageTotal = { prompt_tokens: 0, completion_tokens: 0, last_prompt: 0 };
     for (let step = 0; step < MAX_STEPS; step++) {
       if (signal && signal.aborted) { this.emit({ type: 'aborted' }); return; }
       this.emit({ type: 'turn_start', step });
@@ -86,6 +103,7 @@ class Session {
         res = await streamChat({
           apiKey: this.apiKey, baseUrl: this.baseUrl, model: this.model,
           messages: this.messages, tools: advertised, signal,
+          reasoning: this.effort ? { effort: this.effort } : null,
           onText: (d) => this.emit({ type: 'text', delta: d }),
           onReasoning: (d) => this.emit({ type: 'reasoning', delta: d }),
         });
@@ -96,6 +114,8 @@ class Session {
       if (res.usage) {
         usageTotal.prompt_tokens += res.usage.prompt_tokens || 0;
         usageTotal.completion_tokens += res.usage.completion_tokens || 0;
+        // last step's prompt size ≈ the current context-window footprint
+        usageTotal.last_prompt = res.usage.prompt_tokens || usageTotal.last_prompt;
       }
 
       const assistantMsg = { role: 'assistant', content: res.content || '' };

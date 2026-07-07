@@ -29,7 +29,15 @@
           <button id="dirBtn" class="chip" title="Working directory">📁 <span id="dirLabel">…</span></button>
         </div>
         <div class="spacer"></div>
-        <span id="usageLabel" class="usage" title="Session tokens · estimated cost"></span>
+        <button id="usageLabel" class="usage" title="Context window & usage"></button>
+        <div id="usageMenu" class="menu" style="display:none">
+          <div class="menu-title">Context window <span id="ctxPct" class="mi-hint"></span></div>
+          <div class="bar"><div id="ctxBar" class="bar-fill"></div></div>
+          <div class="menu-sep"></div>
+          <div class="menu-line">Session cost <span id="umCost" class="mi-hint"></span></div>
+          <div class="menu-line">OpenRouter credits <span id="umCredits" class="mi-hint">…</span></div>
+          <div class="bar"><div id="creditsBar" class="bar-fill"></div></div>
+        </div>
         <button id="diffToggle" class="icon-btn" title="Changes panel (⌘D)">±</button>
         <button id="runBtn" class="icon-btn" title="Run / preview">▷</button>
         <button id="moreBtn" class="icon-btn" title="More">⋮</button>
@@ -59,14 +67,43 @@
         <div id="popup" class="popup" style="display:none"></div>
         <div class="composer">
           <div class="composer-box">
+            <div id="attachRow" class="attach-row" style="display:none"></div>
             <textarea id="input" rows="1" placeholder="Ask anything — @ to mention a file, / for commands…"></textarea>
             <div class="composer-foot">
+              <button id="plusBtn" class="chip model-chip" title="Attach (⌘U)">＋</button>
               <button id="modeBtn" class="chip mode" title="Permission mode (⇧Tab)">🔨 Ask</button>
               <div class="spacer"></div>
+              <button id="effortBtn" class="chip model-chip" title="Reasoning effort">Effort</button>
               <button id="modelBtn" class="chip model-chip" title="Model (⌘K)">◆ <span id="modelLabel">…</span></button>
               <button id="sendBtn" class="send" title="Send (Enter)">↑</button>
               <button id="stopBtn" class="send stop" style="display:none" title="Stop (Esc)">■</button>
             </div>
+          </div>
+
+          <!-- mode picker -->
+          <div id="modeMenu" class="menu up-menu" style="display:none">
+            <div class="menu-title">Mode</div>
+            <div class="menu-item" data-mode="plan">📋 Plan mode <span class="mi-hint">1</span></div>
+            <div class="menu-item" data-mode="ask">🔨 Manual permissions <span class="mi-hint">2</span></div>
+            <div class="menu-item" data-mode="edits">✎ Accept edits <span class="mi-hint">3</span></div>
+            <div class="menu-item" data-mode="auto">⚡ Auto mode <span class="mi-hint">4</span></div>
+            <div class="menu-item" data-mode="bypass">⚠ Bypass permissions <span class="mi-hint">5</span></div>
+          </div>
+
+          <!-- + attach menu -->
+          <div id="plusMenu" class="menu up-menu" style="display:none">
+            <div class="menu-item" data-act="attach">📎 Add files or photos <span class="mi-hint">⌘U</span></div>
+            <div class="menu-item" data-act="folder">📁 Add folder</div>
+            <div class="menu-item" data-act="slash">▸ Slash commands</div>
+          </div>
+
+          <!-- effort picker -->
+          <div id="effortMenu" class="menu up-menu right-up" style="display:none">
+            <div class="menu-title">Effort — <span class="mi-hint">faster ↔ smarter (reasoning models)</span></div>
+            <div class="menu-item" data-effort="">Model default</div>
+            <div class="menu-item" data-effort="low">Low — faster</div>
+            <div class="menu-item" data-effort="medium">Medium</div>
+            <div class="menu-item" data-effort="high">High — smarter</div>
           </div>
         </div>
       </footer>

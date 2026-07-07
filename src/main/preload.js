@@ -14,7 +14,7 @@ contextBridge.exposeInMainWorld('harness', {
   sessionGet: (id) => ipcRenderer.invoke('session-get', id),
   sessionRename: (id, title) => ipcRenderer.invoke('session-rename', { id, title }),
   sessionConfig: (id, patch) => ipcRenderer.invoke('session-config', { id, patch }),
-  sessionSend: (id, text) => ipcRenderer.invoke('session-send', { id, text }),
+  sessionSend: (id, text, images) => ipcRenderer.invoke('session-send', { id, text, images }),
   sessionAbort: (id) => ipcRenderer.invoke('session-abort', id),
   sessionClear: (id) => ipcRenderer.invoke('session-clear', id),
   sessionCompact: (id) => ipcRenderer.invoke('session-compact', id),
@@ -36,6 +36,11 @@ contextBridge.exposeInMainWorld('harness', {
   taskLog: (id) => ipcRenderer.invoke('task-log', id),
   projectScripts: (id) => ipcRenderer.invoke('project-scripts', id),
   onTaskEvent: (cb) => ipcRenderer.on('task-event', (_e, ev) => cb(ev)),
+
+  // usage + attachments
+  credits: () => ipcRenderer.invoke('credits'),
+  pickFiles: (id) => ipcRenderer.invoke('pick-files', id),
+  pickFolderPath: (id) => ipcRenderer.invoke('pick-folder-path', id),
 
   // files panel + open-in
   fileTree: (id, sub) => ipcRenderer.invoke('file-tree', { id, sub }),

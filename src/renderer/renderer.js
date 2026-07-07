@@ -62,8 +62,9 @@ function logOf(rec) { return rec.logEl; }
 function atBottom(el) { return el.scrollHeight - el.scrollTop - el.clientHeight < 90; }
 function scrollLog(rec) { const el = logOf(rec); requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; }); }
 
-function addUser(rec, text) {
-  const el = document.createElement('div'); el.className = 'msg user'; el.textContent = text;
+function addUser(rec, text, imageCount) {
+  const el = document.createElement('div'); el.className = 'msg user';
+  el.textContent = (imageCount ? '🖼 ' + imageCount + ' image' + (imageCount > 1 ? 's' : '') + '\n' : '') + text;
   logOf(rec).appendChild(el); scrollLog(rec);
 }
 function addLine(rec, cls, text) {
@@ -163,7 +164,7 @@ function addDiff(rec, file, before, after) {
 }
 
 function renderItem(rec, item) {
-  if (item.t === 'user') addUser(rec, item.text);
+  if (item.t === 'user') addUser(rec, item.text, item.images);
   else if (item.t === 'assistant') {
     const c = ensureAssistant(rec);
     if (item.think) { c.think.style.display = 'block'; c.thinkBody.textContent = item.think; }
@@ -241,20 +242,31 @@ async function activate(id) {
   updateTitlebar();
   updateComposer();
   hidePopup();
+  hideMenus();
+  renderAttachRow();
   maybeShowApproval();
   if (S.panel === 'changes') refreshGit();
   else if (S.panel === 'files') refreshFiles();
   $('input').focus();
 }
 
+const MODES = [
+  { key: 'plan', label: '📋 Plan mode', chip: '📋 Plan' },
+  { key: 'ask', label: '🔨 Manual permissions', chip: '🔨 Ask' },
+  { key: 'edits', label: '✎ Accept edits', chip: '✎ Edits' },
+  { key: 'auto', label: '⚡ Auto mode', chip: '⚡ Auto' },
+  { key: 'bypass', label: '⚠ Bypass permissions', chip: '⚠ Bypass' },
+];
 function updateTitlebar() {
   const rec = active(); if (!rec) return;
   const m = rec.meta;
   $('dirLabel').textContent = shortDir(m.cwd);
   $('modelLabel').textContent = shortModel(m.model);
   const mb = $('modeBtn');
-  mb.textContent = m.mode === 'plan' ? '📋 Plan' : m.mode === 'auto' ? '⚡ Auto' : '🔨 Ask';
+  const md = MODES.find((x) => x.key === m.mode) || MODES[1];
+  mb.textContent = md.chip;
   mb.className = 'chip mode ' + m.mode;
+  $('effortBtn').textContent = m.effort ? '◔ ' + m.effort[0].toUpperCase() + m.effort.slice(1) : 'Effort';
   const u = m.usage || { prompt_tokens: 0, completion_tokens: 0, cost: 0 };
   const tot = (u.prompt_tokens || 0) + (u.completion_tokens || 0);
   $('usageLabel').textContent = tot ? fmtTokens(tot) + ' tok' + (u.cost ? ' · $' + u.cost.toFixed(u.cost < 0.1 ? 4 : 2) : '') : '';
@@ -314,29 +326,31 @@ function endTurn(rec) {
   renderSidebar();
   if (rec.queued.length) {
     const next = rec.queued.shift();
-    setTimeout(() => sendText(rec, next), 80);
+    setTimeout(() => sendText(rec, next.text, next.images), 80);
   }
 }
 
 H.onSessionsUpdated(() => refreshSessions());
 
 // ---------------------------------------------------------------- send / stop
-async function sendText(rec, text) {
-  if (rec.streaming) { rec.queued.push(text); updateComposer(); return; }
+async function sendText(rec, text, images) {
+  if (rec.streaming) { rec.queued.push({ text, images }); updateComposer(); return; }
   rec.streaming = true; rec.cur = null;
-  const r = await H.sessionSend(rec.meta.id, text);
-  if (r.ok) addUser(rec, text);
-  else if (r.error === 'busy') rec.queued.push(text);
+  const r = await H.sessionSend(rec.meta.id, text, images && images.length ? images : undefined);
+  if (r.ok) addUser(rec, text, images ? images.length : 0);
+  else if (r.error === 'busy') rec.queued.push({ text, images });
   else rec.streaming = false;
   updateComposer(); renderSidebar();
 }
 async function onSend() {
   const rec = active(); if (!rec) return;
   const text = $('input').value.trim();
-  if (!text) return;
+  const images = (rec.attachments || []).map((a) => a.dataUrl).filter(Boolean);
+  if (!text && !images.length) return;
   $('input').value = ''; $('input').style.height = 'auto'; hidePopup();
   if (text.startsWith('/') && runSlash(rec, text)) return;
-  sendText(rec, text);
+  rec.attachments = []; renderAttachRow();
+  sendText(rec, text || 'See the attached image(s).', images);
 }
 $('sendBtn').onclick = onSend;
 $('stopBtn').onclick = () => { const rec = active(); if (rec) H.sessionAbort(rec.meta.id); };
@@ -464,7 +478,7 @@ async function setSessionConfig(patch) {
   if (m) rec.meta = m;
   updateTitlebar(); renderSidebar();
 }
-const MODE_CYCLE = { ask: 'auto', auto: 'plan', plan: 'ask' };
+const MODE_CYCLE = { plan: 'ask', ask: 'edits', edits: 'auto', auto: 'bypass', bypass: 'plan' };
 function cycleMode() { const rec = active(); if (rec) setSessionConfig({ mode: MODE_CYCLE[rec.meta.mode] || 'ask' }); }
 async function pickDir() {
   const rec = active(); if (!rec) return;
@@ -475,8 +489,111 @@ async function pickDir() {
     else if (S.panel === 'files') refreshFiles();
   }
 }
-$('modeBtn').onclick = cycleMode;
 $('dirBtn').onclick = pickDir;
+
+// ---- mode menu (click the pill; 1–5 select; ⇧Tab still cycles)
+$('modeBtn').onclick = () => {
+  const open = $('modeMenu').style.display !== 'none';
+  hideMenus();
+  if (open) return;
+  const rec = active(); if (!rec) return;
+  for (const it of document.querySelectorAll('#modeMenu .menu-item'))
+    it.classList.toggle('on', it.dataset.mode === rec.meta.mode);
+  $('modeMenu').style.display = '';
+};
+$('modeMenu').addEventListener('click', (e) => {
+  const it = e.target.closest('.menu-item'); if (!it) return;
+  hideMenus();
+  setSessionConfig({ mode: it.dataset.mode });
+});
+
+// ---- effort menu (OpenRouter unified reasoning effort — faster ↔ smarter)
+$('effortBtn').onclick = () => {
+  const open = $('effortMenu').style.display !== 'none';
+  hideMenus();
+  if (open) return;
+  const rec = active(); if (!rec) return;
+  for (const it of document.querySelectorAll('#effortMenu .menu-item'))
+    it.classList.toggle('on', (it.dataset.effort || '') === (rec.meta.effort || ''));
+  $('effortMenu').style.display = '';
+};
+$('effortMenu').addEventListener('click', (e) => {
+  const it = e.target.closest('.menu-item'); if (!it) return;
+  hideMenus();
+  setSessionConfig({ effort: it.dataset.effort || null });
+});
+
+// ---- + menu: attach files/photos, add folder, slash commands
+function renderAttachRow() {
+  const rec = active();
+  const row = $('attachRow');
+  const atts = rec ? (rec.attachments || []) : [];
+  row.style.display = atts.length ? '' : 'none';
+  row.innerHTML = '';
+  atts.forEach((a, i) => {
+    const chip = document.createElement('div'); chip.className = 'att-chip';
+    chip.innerHTML = (a.dataUrl ? '<img src="' + a.dataUrl + '">' : '📄') + '<span>' + esc(a.name) + '</span><button title="Remove">✕</button>';
+    chip.querySelector('button').onclick = () => { rec.attachments.splice(i, 1); renderAttachRow(); };
+    row.appendChild(chip);
+  });
+}
+async function attachFiles() {
+  const rec = active(); if (!rec) return;
+  const picked = await H.pickFiles(rec.meta.id);
+  rec.attachments = rec.attachments || [];
+  for (const f of picked) {
+    if (f.kind === 'image') rec.attachments.push({ name: f.name, dataUrl: f.dataUrl });
+    else if (f.kind === 'path') { const i = $('input'); i.value = (i.value ? i.value.replace(/\s?$/, ' ') : '') + '@' + f.path + ' '; }
+    else if (f.kind === 'error') addLine(rec, 'err', '⚠︎ ' + f.name + ': ' + f.error);
+  }
+  renderAttachRow();
+  $('input').focus();
+}
+$('plusBtn').onclick = () => {
+  const open = $('plusMenu').style.display !== 'none';
+  hideMenus();
+  if (!open) $('plusMenu').style.display = '';
+};
+$('plusMenu').addEventListener('click', async (e) => {
+  const it = e.target.closest('.menu-item'); if (!it) return;
+  hideMenus();
+  const rec = active(); if (!rec) return;
+  if (it.dataset.act === 'attach') attachFiles();
+  else if (it.dataset.act === 'folder') {
+    const p = await H.pickFolderPath(rec.meta.id);
+    if (p) { const i = $('input'); i.value = (i.value ? i.value.replace(/\s?$/, ' ') : '') + '@' + p + '/ '; i.focus(); }
+  }
+  else if (it.dataset.act === 'slash') { const i = $('input'); i.value = '/'; i.focus(); i.dispatchEvent(new Event('input')); }
+});
+
+// ---- usage popover: context window + session cost + OpenRouter credits
+$('usageLabel').onclick = async () => {
+  const open = $('usageMenu').style.display !== 'none';
+  hideMenus();
+  if (open) return;
+  const rec = active(); if (!rec) return;
+  $('usageMenu').style.display = '';
+  if (!S.models.length) S.models = await H.listModels(false);
+  const mm = S.models.find((x) => x.value === rec.meta.model);
+  const limit = mm && mm.context ? mm.context : 0;
+  const used = (rec.meta.usage && rec.meta.usage.context) || 0;
+  const pct = limit ? Math.min(100, Math.round(used / limit * 100)) : 0;
+  $('ctxPct').textContent = limit ? fmtTokens(used) + ' / ' + fmtTokens(limit) + ' (' + pct + '%)' : fmtTokens(used) + ' used';
+  $('ctxBar').style.width = pct + '%';
+  const cost = (rec.meta.usage && rec.meta.usage.cost) || 0;
+  $('umCost').textContent = '$' + cost.toFixed(cost < 0.1 ? 4 : 2);
+  $('umCredits').textContent = '…';
+  const cr = await H.credits();
+  if (cr && cr.total != null) {
+    $('umCredits').textContent = '$' + (cr.used || 0).toFixed(2) + ' used of $' + cr.total.toFixed(2);
+    $('creditsBar').style.width = Math.min(100, Math.round((cr.used || 0) / cr.total * 100)) + '%';
+  } else if (cr && cr.used != null) {
+    $('umCredits').textContent = '$' + cr.used.toFixed(2) + ' used';
+    $('creditsBar').style.width = '0%';
+  } else {
+    $('umCredits').textContent = 'unavailable';
+  }
+};
 async function newChat() {
   const m = await H.sessionCreate({});
   await refreshSessions();
@@ -595,9 +712,11 @@ async function showFileDiff(file) {
 }
 
 // ---------------------------------------------------------------- run popover + more menu
-function hideMenus() { $('runPop').style.display = 'none'; $('moreMenu').style.display = 'none'; }
+const MENU_IDS = ['runPop', 'moreMenu', 'modeMenu', 'plusMenu', 'effortMenu', 'usageMenu'];
+const MENU_TRIGGERS = ['#runBtn', '#moreBtn', '#modeBtn', '#plusBtn', '#effortBtn', '#usageLabel'];
+function hideMenus() { for (const id of MENU_IDS) $(id).style.display = 'none'; }
 document.addEventListener('mousedown', (e) => {
-  if (!e.target.closest('.menu') && !e.target.closest('#runBtn') && !e.target.closest('#moreBtn')) hideMenus();
+  if (!e.target.closest('.menu') && !MENU_TRIGGERS.some((sel) => e.target.closest(sel))) hideMenus();
 });
 
 $('runBtn').onclick = async () => {
@@ -812,6 +931,13 @@ $('keySave').onclick = async () => {
 // ---------------------------------------------------------------- global keys
 document.addEventListener('keydown', (e) => {
   const mod = e.metaKey || e.ctrlKey;
+  // number keys pick a mode while the mode menu is open
+  if ($('modeMenu').style.display !== 'none' && e.key >= '1' && e.key <= '5') {
+    e.preventDefault(); hideMenus();
+    setSessionConfig({ mode: MODES[+e.key - 1].key });
+    return;
+  }
+  if (mod && e.key.toLowerCase() === 'u') { e.preventDefault(); attachFiles(); return; }
   if (mod && e.key.toLowerCase() === 'n') { e.preventDefault(); newChat(); }
   else if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); openModelSheet(false); }
   else if (mod && e.key.toLowerCase() === 'b') { e.preventDefault(); $('sideToggle').onclick(); }
