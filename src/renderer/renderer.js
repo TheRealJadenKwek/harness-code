@@ -267,6 +267,10 @@ function updateTitlebar() {
   const md = MODES.find((x) => x.key === m.mode) || MODES[1];
   mb.textContent = md.chip;
   mb.className = 'chip mode ' + m.mode;
+  // effort only exists for reasoning-capable models — hide the chip otherwise
+  const mm = S.models.find((x) => x.value === m.model);
+  const canReason = mm ? !!mm.reasoning : false;
+  $('effortBtn').style.display = canReason ? '' : 'none';
   $('effortBtn').textContent = m.effort ? '◔ ' + m.effort[0].toUpperCase() + m.effort.slice(1) : 'Effort';
   const u = m.usage || { prompt_tokens: 0, completion_tokens: 0, cost: 0 };
   const tot = (u.prompt_tokens || 0) + (u.completion_tokens || 0);
@@ -996,7 +1000,7 @@ function renderModels(q) {
   for (const m of list.slice(0, 400)) {
     const row = document.createElement('div');
     row.className = 'model-row' + (rec && m.value === rec.meta.model ? ' sel' : '');
-    row.innerHTML = '<div class="m-line"><div>' + esc(m.label) + '</div><div class="m-price">' + esc(priceStr(m)) + '</div></div>' +
+    row.innerHTML = '<div class="m-line"><div>' + esc(m.label) + (m.reasoning ? ' <span class="mi-hint" title="Supports reasoning effort">🧠</span>' : '') + '</div><div class="m-price">' + esc(priceStr(m)) + '</div></div>' +
       '<div class="mv">' + esc(m.value) + (m.context ? ' · ' + Math.round(m.context / 1000) + 'k ctx' : '') + '</div>';
     row.onclick = () => chooseModel(m.value);
     box.appendChild(row);
@@ -1151,5 +1155,8 @@ document.addEventListener('keydown', (e) => {
   const cfg = await H.getConfig();
   if (!cfg.hasKey) $('settingsSheet').style.display = 'flex';
   loadSkills();
+  // the effort chip needs per-model reasoning flags — load the (cached) catalog now
+  S.models = await H.listModels(false);
+  updateTitlebar();
   setInterval(renderSidebar, 60000);   // keep "2m ago" labels fresh
 })();

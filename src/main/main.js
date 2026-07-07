@@ -114,6 +114,7 @@ function fetchModels(apiKey) {
             value: m.id, label: m.name || m.id,
             context: m.context_length || 0,
             pricing: m.pricing ? { prompt: Number(m.pricing.prompt) || 0, completion: Number(m.pricing.completion) || 0 } : null,
+            reasoning: Array.isArray(m.supported_parameters) && m.supported_parameters.includes('reasoning'),
           }));
           items.sort((a, z) => a.value.localeCompare(z.value));
           resolve(items);
@@ -129,7 +130,8 @@ async function getModels(force) {
   if (!force) {
     try {
       const c = JSON.parse(fs.readFileSync(modelsCachePath(), 'utf8'));
-      if (c.items && c.items.length && Date.now() - c.fetchedAt < 24 * 3600 * 1000) {
+      // invalidate caches from before the per-model `reasoning` flag existed
+      if (c.items && c.items.length && c.items[0].reasoning !== undefined && Date.now() - c.fetchedAt < 24 * 3600 * 1000) {
         modelsMem = c.items;
         return modelsMem;
       }
@@ -145,6 +147,10 @@ async function getModels(force) {
 function priceOf(model) {
   const m = (modelsMem || []).find((x) => x.value === model);
   return m && m.pricing ? m.pricing : null;
+}
+function supportsReasoning(model) {
+  const m = (modelsMem || []).find((x) => x.value === model);
+  return m ? !!m.reasoning : true;   // unknown model → don't block (OpenRouter drops the param anyway)
 }
 
 // ---- agent event folding: mirror the live event stream into a compact transcript
@@ -831,11 +837,15 @@ ipcMain.handle('session-config', (_e, { id, patch }) => {
   if (patch.model) {
     rec.model = patch.model; cfg.model = patch.model;
     if (!patch.mode && cfg.modeByModel[patch.model]) rec.mode = cfg.modeByModel[patch.model];
-    // effort follows the model too: restore what you last used with this model
-    if (patch.effort === undefined) rec.effort = cfg.effortByModel[patch.model] || null;
+    // effort follows the model too: restore what you last used with this model —
+    // and clear it entirely for models that don't support reasoning at all
+    if (patch.effort === undefined) rec.effort = supportsReasoning(patch.model) ? (cfg.effortByModel[patch.model] || null) : null;
   }
   if (patch.cwd) { rec.cwd = patch.cwd; cfg.cwd = patch.cwd; }
-  if (patch.effort !== undefined) { rec.effort = patch.effort || null; cfg.effortByModel[rec.model] = rec.effort; }
+  if (patch.effort !== undefined) {
+    rec.effort = supportsReasoning(rec.model) ? (patch.effort || null) : null;
+    cfg.effortByModel[rec.model] = rec.effort;
+  }
   saveConfig(cfg);
   if (rec.agent) {
     if (patch.model) rec.agent.setModel(rec.model);
