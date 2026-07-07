@@ -70,7 +70,13 @@ contextBridge.exposeInMainWorld('harness', {
   openIn: (id, target) => ipcRenderer.invoke('open-in', { id, target }),
 
   // approvals + events
-  respondApproval: (id, approved) => ipcRenderer.send('approval-response', { id, approved }),
+  respondApproval: (id, approved, always) => ipcRenderer.send('approval-response', { id, approved, always }),
+  sessionSteer: (id, text) => ipcRenderer.invoke('session-steer', { id, text }),
+  sessionWorktree: (id) => ipcRenderer.invoke('session-worktree', id),
+  gitCommit: (id, message) => ipcRenderer.invoke('git-commit', { id, message }),
+  gitPr: (id) => ipcRenderer.invoke('git-pr', id),
+  rulesList: () => ipcRenderer.invoke('rules-list'),
+  ruleRemove: (idx) => ipcRenderer.invoke('rule-remove', idx),
   onEvent: (cb) => ipcRenderer.on('agent-event', (_e, ev) => cb(ev)),
   onApproval: (cb) => ipcRenderer.on('approval', (_e, a) => cb(a)),
   onSessionsUpdated: (cb) => ipcRenderer.on('sessions-updated', () => cb()),

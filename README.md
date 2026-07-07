@@ -37,6 +37,11 @@ Built from scratch (a real agent loop, not a wrapper). Electron GUI + a zero-dep
 - **Appshots** — press ⌘⇧H anywhere to capture the screen and attach it to the active chat (needs Screen Recording permission).
 - **/fork · /goal · /loop** — duplicate a session with full history, pin a standing goal into the system prompt, or re-run a prompt on an interval.
 - **Monochrome UI, light & dark** — follows the system theme.
+- **Permission rules** — "Always allow" on any approval saves a per-project prefix rule (manage in Settings); destructive actions never skip approval.
+- **Sandboxed shell** — bash runs under macOS Seatbelt: reads unrestricted, writes limited to the project + temp (toggle in Settings).
+- **Worktrees** — right-click a chat → "Fork to worktree": an isolated git worktree + branch per session; deleted with the session. **Commit / PR buttons** in the Changes panel (PR via `gh`).
+- **Mid-turn steering** — hit Enter while the agent works and your message is injected into the running turn (↳), not queued.
+- **Sub-agents** — the model can delegate self-contained tasks to a fresh-context `agent` tool (same toolset, no recursive spawning).
 - **Keyboard-first** — ⌘N new chat, ⌘K models, ⌘B sidebar, ⌘D changes panel, ⌘1–9 switch session, ⇧Tab cycle mode, Enter/Esc approve/deny, Esc stop.
 
 ## Run

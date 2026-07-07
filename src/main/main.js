@@ -44,7 +44,13 @@ function loadConfig() {
   cfg.effortByModel = cfg.effortByModel || {}; // remembered reasoning effort per model
   cfg.mcpServers = cfg.mcpServers || [];       // [{name, command, enabled}]
   cfg.pluginsDisabled = cfg.pluginsDisabled || [];   // plugin dir names the user switched off
+  cfg.allowRules = cfg.allowRules || [];             // [{kind, prefix, cwd}] — "always allow" rules
+  if (cfg.sandboxBash === undefined) cfg.sandboxBash = true;
   return cfg;
+}
+function ruleMatches(kind, detail, cwd) {
+  const cfg = loadConfig();
+  return cfg.allowRules.some((r) => r.kind === kind && String(detail || '').startsWith(r.prefix) && (!r.cwd || r.cwd === cwd));
 }
 function saveConfig(cfg) {
   try { fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2)); } catch {}
@@ -58,6 +64,7 @@ function metaOf(rec) {
     id: rec.id, title: rec.title, cwd: rec.cwd, model: rec.model, mode: rec.mode,
     effort: rec.effort || null, goal: rec.goal || null,
     pinned: !!rec.pinned, unread: !!rec.unread, group: rec.group || null, archived: !!rec.archived,
+    worktree: rec.worktree || null,
     createdAt: rec.createdAt, updatedAt: rec.updatedAt, usage: rec.usage,
     streaming: !!rec.abort,
   };
@@ -71,6 +78,7 @@ function saveSession(rec) {
         id: rec.id, title: rec.title, cwd: rec.cwd, model: rec.model, mode: rec.mode,
         effort: rec.effort || null, goal: rec.goal || null,
         pinned: !!rec.pinned, unread: !!rec.unread, group: rec.group || null, archived: !!rec.archived,
+        worktree: rec.worktree || null,
         createdAt: rec.createdAt, updatedAt: rec.updatedAt, usage: rec.usage,
       },
       messages: rec.agent ? rec.agent.messages : (rec.savedMessages || []),
@@ -240,10 +248,17 @@ function ensureAgent(rec) {
       extraTools: makeExtraTools(rec),
       emit: (e) => onAgentEvent(rec, e),
       approve: (kind, detail, opts = {}) => new Promise((resolve) => {
+        // "always allow" rules auto-approve non-destructive requests
+        if (!opts.danger && ruleMatches(kind, detail, rec.cwd)) {
+          rec.transcript.push({ t: 'note', text: '✓ allowed by rule: ' + kind + ' ' + String(detail || '').slice(0, 60) });
+          sendToUI('agent-event', { sessionId: rec.id, type: 'control_note', message: '✓ allowed by rule: ' + kind + ' ' + String(detail || '').slice(0, 60) });
+          return resolve(true);
+        }
         const aid = ++approvalSeq;
-        pendingApprovals.set(aid, resolve);
+        pendingApprovals.set(aid, { resolve, kind, detail, cwd: rec.cwd });
         sendToUI('approval', { sessionId: rec.id, sessionTitle: rec.title, id: aid, kind, detail, danger: !!opts.danger });
       }),
+      sandbox: loadConfig().sandboxBash !== false,
     });
     if (rec.savedMessages && rec.savedMessages.length) rec.agent.loadMessages(rec.savedMessages);
     rec.savedMessages = null;
@@ -800,10 +815,45 @@ const COMPUTER_TOOLS = {
   },
 };
 
-function makeExtraTools(rec) {
+// Sub-agent: the model can delegate a self-contained task to a fresh agent with its
+// own context window. Sub-agents cannot spawn further sub-agents.
+const AGENT_TOOL_SCHEMA = {
+  name: 'agent',
+  description: 'Delegate a self-contained task to a sub-agent with a FRESH context (it does not see this conversation). Give it complete instructions and everything it needs to know. It has the same tools (files, bash, browser) and returns its final report. Use for parallel-izable or context-heavy subtasks like "audit all files under src/ for X".',
+  parameters: { type: 'object', properties: {
+    task: { type: 'string', description: 'Complete, self-contained instructions for the sub-agent.' },
+  }, required: ['task'] },
+};
+async function runSubAgent(rec, task) {
+  const cfg = loadConfig();
+  let finalText = '';
+  let toolsUsed = 0;
+  const sub = new Session({
+    apiKey: cfg.apiKey, model: rec.model, cwd: rec.cwd, mode: rec.mode,
+    effort: rec.effort || null, textTools: !supportsTools(rec.model),
+    sandbox: cfg.sandboxBash !== false,
+    extraTools: makeExtraTools(rec, true),
+    emit: (e) => {
+      if (e.type === 'tool_call') { toolsUsed++; sendToUI('agent-event', { sessionId: rec.id, type: 'control_note', message: '· sub-agent → ' + e.name }); }
+      if (e.type === 'done') finalText = e.text || '';
+      if (e.type === 'error') finalText = '[sub-agent error] ' + e.message;
+    },
+    approve: (kind, detail, opts = {}) => new Promise((resolve) => {
+      if (!opts.danger && ruleMatches(kind, detail, rec.cwd)) return resolve(true);
+      const aid = ++approvalSeq;
+      pendingApprovals.set(aid, { resolve, kind, detail, cwd: rec.cwd });
+      sendToUI('approval', { sessionId: rec.id, sessionTitle: rec.title + ' · sub-agent', id: aid, kind, detail, danger: !!opts.danger });
+    }),
+  });
+  await sub.send(task, rec.abort ? rec.abort.signal : undefined);
+  return { report: (finalText || '(no report)').slice(0, 20000), tools_used: toolsUsed };
+}
+
+function makeExtraTools(rec, noAgent) {
   return {
     get schemas() {
       const out = [...Object.values(BROWSER_TOOLS), ...Object.values(COMPUTER_TOOLS)].map((t) => ({ type: 'function', function: t.schema }));
+      if (!noAgent) out.push({ type: 'function', function: AGENT_TOOL_SCHEMA });
       for (const [srv, client] of mcpClients) {
         if (client.status !== 'running') continue;
         for (const t of client.tools) {
@@ -818,11 +868,13 @@ function makeExtraTools(rec) {
     },
     has(name) {
       if (BROWSER_TOOLS[name] || COMPUTER_TOOLS[name]) return true;
+      if (name === 'agent' && !noAgent) return true;
       return name.startsWith('mcp__') && this._route(name) !== null;
     },
     gate(name, args) {
       if (BROWSER_TOOLS[name]) return BROWSER_TOOLS[name].gate(args || {});
       if (COMPUTER_TOOLS[name]) return COMPUTER_TOOLS[name].gate(args || {});
+      if (name === 'agent') return { kind: 'agent', detail: String((args || {}).task || '').slice(0, 160), danger: false };
       return { kind: 'mcp', detail: name.replace(/^mcp__/, '').replace('__', ' → ') + ' ' + JSON.stringify(args || {}).slice(0, 160), danger: false };
     },
     _route(name) {
@@ -839,6 +891,7 @@ function makeExtraTools(rec) {
     run(name, args) {
       if (BROWSER_TOOLS[name]) return BROWSER_TOOLS[name].run(args || {});
       if (COMPUTER_TOOLS[name]) return COMPUTER_TOOLS[name].run(args || {}, rec);
+      if (name === 'agent' && !noAgent) return runSubAgent(rec, String((args || {}).task || ''));
       const r = this._route(name);
       if (!r) return Promise.resolve({ error: 'unknown MCP tool: ' + name });
       return r.client.call(r.tool, args || {});
@@ -1056,12 +1109,13 @@ ipcMain.handle('open-in', (_e, { id, target }) => {
 // ---- IPC: config ---------------------------------------------------------------
 ipcMain.handle('get-config', () => {
   const c = loadConfig();
-  return { hasKey: !!c.apiKey, model: c.model, mode: c.mode, cwd: c.cwd };
+  return { hasKey: !!c.apiKey, model: c.model, mode: c.mode, cwd: c.cwd, sandboxBash: c.sandboxBash !== false };
 });
 ipcMain.handle('set-config', (_e, patch) => {
   const c = loadConfig();
   saveConfig({ ...c, ...patch });
   if (patch.apiKey) for (const rec of sessions.values()) if (rec.agent) rec.agent.apiKey = patch.apiKey;
+  if (patch.sandboxBash !== undefined) for (const rec of sessions.values()) if (rec.agent) rec.agent.sandbox = !!patch.sandboxBash;
   return { ok: true };
 });
 
@@ -1083,12 +1137,16 @@ ipcMain.handle('session-create', (_e, opts = {}) => {
   return metaOf(rec);
 });
 
-ipcMain.handle('session-delete', (_e, id) => {
+ipcMain.handle('session-delete', async (_e, id) => {
   const rec = sessions.get(id);
   if (rec) {
     if (rec.abort) rec.abort.abort();
     sessions.delete(id);
     try { fs.unlinkSync(sessionFile(id)); } catch {}
+    if (rec.worktree) {   // clean up the isolated worktree with the session
+      await git(rec.worktree.repo, ['worktree', 'remove', '--force', rec.worktree.path]);
+      await git(rec.worktree.repo, ['branch', '-D', rec.worktree.branch]);
+    }
   }
   return { ok: true };
 });
@@ -1252,9 +1310,80 @@ ipcMain.handle('session-compact', async (_e, id) => {
   }
 });
 
-ipcMain.on('approval-response', (_e, { id, approved }) => {
-  const resolve = pendingApprovals.get(id);
-  if (resolve) { pendingApprovals.delete(id); resolve(!!approved); }
+ipcMain.on('approval-response', (_e, { id, approved, always }) => {
+  const p = pendingApprovals.get(id);
+  if (!p) return;
+  pendingApprovals.delete(id);
+  if (approved && always) {
+    // rule prefix = the first two tokens of the request ("npm test", "git push"…)
+    const prefix = String(p.detail || '').split(/\s+/).slice(0, 2).join(' ').slice(0, 60) || p.kind;
+    const cfg = loadConfig();
+    if (!cfg.allowRules.some((r) => r.kind === p.kind && r.prefix === prefix && r.cwd === p.cwd)) {
+      cfg.allowRules.push({ kind: p.kind, prefix, cwd: p.cwd });
+      saveConfig(cfg);
+    }
+  }
+  p.resolve(!!approved);
+});
+ipcMain.handle('rules-list', () => loadConfig().allowRules);
+ipcMain.handle('rule-remove', (_e, idx) => {
+  const cfg = loadConfig();
+  cfg.allowRules.splice(idx, 1);
+  saveConfig(cfg);
+  return cfg.allowRules;
+});
+
+// ---- mid-turn steering: inject a user message into the RUNNING turn -----------------
+ipcMain.handle('session-steer', (_e, { id, text }) => {
+  const rec = sessions.get(id);
+  if (!rec || !rec.abort || !rec.agent) return { ok: false, error: 'not running' };
+  rec.agent.steer(text);
+  rec.transcript.push({ t: 'user', text, steered: true });
+  return { ok: true };
+});
+
+// ---- worktrees: fork a session into an isolated git worktree ------------------------
+ipcMain.handle('session-worktree', async (_e, id) => {
+  const src = sessions.get(id);
+  if (!src) return { error: 'no session' };
+  const head = await git(src.cwd, ['rev-parse', '--show-toplevel']);
+  if (head.err) return { error: 'not a git repository' };
+  const repo = head.so.trim();
+  const short = Date.now().toString(36).slice(-5);
+  const wtPath = path.join(path.dirname(repo), path.basename(repo) + '-wt-' + short);
+  const r = await git(repo, ['worktree', 'add', '-b', 'harness/' + short, wtPath]);
+  if (r.err) return { error: 'git worktree failed: ' + (r.se || '').slice(0, 200) };
+  const rec = {
+    id: newId(), title: (src.title + ' ⌥' + short).slice(0, 60),
+    cwd: wtPath, model: src.model, mode: src.mode, effort: src.effort || null, goal: src.goal || null,
+    worktree: { repo, path: wtPath, branch: 'harness/' + short },
+    createdAt: Date.now(), updatedAt: Date.now(),
+    usage: { prompt_tokens: 0, completion_tokens: 0, cost: 0 },
+    agent: null, savedMessages: [], transcript: [{ t: 'note', text: '⌥ isolated worktree on branch harness/' + short + ' — ' + wtPath }],
+    abort: null, cur: null, checkpoints: [],
+  };
+  sessions.set(rec.id, rec);
+  saveSession(rec);
+  return metaOf(rec);
+});
+
+// ---- one-click commit / PR from the Changes panel ------------------------------------
+ipcMain.handle('git-commit', async (_e, { id, message }) => {
+  const rec = sessions.get(id);
+  if (!rec) return { error: 'no session' };
+  const a = await git(rec.cwd, ['add', '-A']);
+  if (a.err) return { error: (a.se || 'git add failed').slice(0, 200) };
+  const c = await git(rec.cwd, ['commit', '-m', message || 'Changes via Harness Code']);
+  if (c.err) return { error: (c.se || c.so || 'nothing to commit').slice(0, 200) };
+  return { ok: true, out: c.so.split('\n')[0] };
+});
+ipcMain.handle('git-pr', (_e, id) => {
+  const rec = sessions.get(id);
+  if (!rec) return { error: 'no session' };
+  return new Promise((resolve) => {
+    execFile('gh', ['pr', 'create', '--fill', '--web'], { cwd: rec.cwd, timeout: 30000 },
+      (err, _so, se) => resolve(err ? { error: ('gh: ' + (se || err.message)).slice(0, 200) } : { ok: true }));
+  });
 });
 
 // ---- IPC: pickers, models, files, git --------------------------------------------

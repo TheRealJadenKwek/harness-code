@@ -24,7 +24,22 @@ class Session {
     //     gate(name,args) -> {kind,detail,danger} | null (null = no approval needed) }
     this.extraTools = opts.extraTools || null;
     this.textTools = !!opts.textTools;   // ReAct-style text protocol for models without native tool calling
+    this.sandbox = opts.sandbox !== false;   // Seatbelt-wrap bash (macOS)
+    this._steer = [];                        // mid-turn user interjections
     this.messages = [this._sys()];
+  }
+
+  // Steer a RUNNING turn: the message is injected at the next loop boundary.
+  steer(text) { this._steer.push(String(text || '')); }
+  _drainSteer() {
+    let had = false;
+    while (this._steer.length) {
+      const t = this._steer.shift();
+      this.messages.push({ role: 'user', content: '[User interjects mid-task — adjust course accordingly]: ' + t });
+      this.emit({ type: 'steered', text: t });
+      had = true;
+    }
+    return had;
   }
 
   // Trim old context: stale tool outputs and all-but-recent screenshots dominate
@@ -121,6 +136,7 @@ class Session {
     this.messages[0] = this._sys();   // pick up HARNESS.md edits and mode changes every turn
     const { tools, schemas } = makeTools({
       cwd: this.cwd,
+      sandbox: this.sandbox,
       approve: gatedApprove,
       onDiff: (file, before, after) => this.emit({ type: 'diff', file, before, after }),
       onPlan: (items) => this.emit({ type: 'plan', items }),
@@ -143,6 +159,7 @@ class Session {
     for (let step = 0; step < MAX_STEPS; step++) {
       if (signal && signal.aborted) { this.emit({ type: 'aborted' }); return; }
       this.emit({ type: 'turn_start', step });
+      this._drainSteer();
       this._trim();
       let res;
       try {
@@ -187,7 +204,8 @@ class Session {
         this.messages.push({ role: 'user', content: 'Your tool block failed to parse (' + textParseError + '). Reply with a corrected ```tool block, or your final answer with no tool block.' });
         continue;
       }
-      if (!toolCalls.length) {                 // final answer
+      if (!toolCalls.length) {                 // final answer…
+        if (this._drainSteer()) continue;      // …unless the user interjected — keep going
         this.emit({ type: 'done', text: res.content, usage: usageTotal });
         return;
       }

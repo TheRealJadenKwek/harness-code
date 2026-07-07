@@ -117,7 +117,7 @@
       </div>
 
       <div id="tab-changes" class="ptab-body">
-        <div class="panel-sub"><span id="gitBranch" class="git-branch"></span><div class="spacer"></div><button id="gitRefresh" class="icon-btn" title="Refresh">⟳</button></div>
+        <div class="panel-sub"><span id="gitBranch" class="git-branch"></span><div class="spacer"></div><button id="gitCommitBtn" class="mini-btn" title="git add -A && commit">Commit</button><button id="gitPrBtn" class="mini-btn" title="gh pr create --fill --web">PR</button><button id="gitRefresh" class="icon-btn" title="Refresh">⟳</button></div>
         <div id="gitFiles" class="git-files"></div>
         <div id="gitDiffView" class="git-diff-view"></div>
       </div>
@@ -181,6 +181,13 @@
             <button id="keySave" class="primary">Save key</button>
             <button id="sessionsFolderBtn" class="sheet-close">Open sessions folder</button>
           </div>
+          <div class="menu-sep"></div>
+          <h3>Shell sandbox</h3>
+          <label style="display:flex;gap:8px;align-items:center;cursor:pointer"><input type="checkbox" id="sandboxToggle" style="width:auto"> Sandbox bash commands — writes limited to the project folder + temp (reads unrestricted)</label>
+          <div class="menu-sep"></div>
+          <h3>Permission rules</h3>
+          <p class="muted">"Always allow" rules — matching non-destructive requests skip the approval prompt.</p>
+          <div id="rulesList" class="settings-list"></div>
           <div class="menu-sep"></div>
           <h3>AI spend</h3>
           <div id="spendGrid" class="sc-grid"></div>
@@ -259,9 +266,12 @@
       <div class="modal-title">Approve <span id="apKind"></span>?<span id="apSession" class="ap-session"></span></div>
       <div id="apWarn" class="ap-warn" style="display:none">⚠ Destructive — this can delete or overwrite files. It stops here even in Auto mode.</div>
       <pre id="apDetail" class="ap-detail"></pre>
-      <div class="row">
-        <button id="apDeny" class="danger">Deny (Esc)</button>
-        <button id="apAllow" class="primary">Allow (⏎)</button>
+      <div class="row" style="justify-content:space-between">
+        <button id="apAlways" class="sheet-close" title="Approve and never ask again for this command prefix in this project">Always allow</button>
+        <div class="row">
+          <button id="apDeny" class="danger">Deny (Esc)</button>
+          <button id="apAllow" class="primary">Allow (⏎)</button>
+        </div>
       </div>
     </div>
   </div>

@@ -238,8 +238,16 @@ function makeTools(ctx) {
         const danger = isDestructiveShell(command);
         const ok = await ctx.approve('bash', command, { danger });
         if (!ok) return { error: 'denied by user' };
+        // Seatbelt sandbox (like Claude Code/Codex): reads anywhere, writes only to
+        // the project + temp. Toggleable in Settings; denials surface as EPERM.
+        const useSandbox = ctx.sandbox && process.platform === 'darwin';
+        const profile = '(version 1)(allow default)(deny file-write*)' +
+          '(allow file-write* (subpath ' + JSON.stringify(R()) + ') (subpath "/private/tmp") (subpath "/tmp")' +
+          ' (subpath "/private/var/folders") (subpath "/dev") (literal "/dev/null"))';
+        const bin = useSandbox ? '/usr/bin/sandbox-exec' : '/bin/bash';
+        const args = useSandbox ? ['-p', profile, '/bin/bash', '-lc', command] : ['-lc', command];
         return await new Promise((resolve) => {
-          execFile('/bin/bash', ['-lc', command], { cwd: R(), timeout: 120000, maxBuffer: 4 * 1024 * 1024 },
+          execFile(bin, args, { cwd: R(), timeout: 120000, maxBuffer: 4 * 1024 * 1024 },
             (err, stdout, stderr) => {
               resolve({
                 command,

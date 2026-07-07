@@ -193,7 +193,7 @@ function addCkptLine(rec, ckptId, files) {
 }
 
 function renderItem(rec, item) {
-  if (item.t === 'user') addUser(rec, item.text, item.images);
+  if (item.t === 'user') addUser(rec, (item.steered ? '↳ ' : '') + item.text, item.images);
   else if (item.t === 'plan') { renderPlan(rec, item.items); rec.planEl = null; }
   else if (item.t === 'ckpt') addCkptLine(rec, item.id, item.files);
   else if (item.t === 'assistant') {
@@ -329,6 +329,12 @@ function showCtxMenu(x, y, id, view) {
       const nm = await H.sessionFork(id);
       if (nm) { await refreshSessions(); activate(nm.id); }
     });
+    item('Fork to worktree <span class="mi-hint">W</span>', async () => {
+      hideCtxMenu();
+      const nm = await H.sessionWorktree(id);
+      if (nm && nm.error) { alert(nm.error); return; }
+      if (nm) { await refreshSessions(); activate(nm.id); }
+    });
     sep();
     item('Move to group <span class="mi-hint">›</span>', (e) => { e.stopPropagation(); reopen('group'); });
     sep();
@@ -366,6 +372,7 @@ document.addEventListener('keydown', (e) => {
   else if (k === 'u') { e.preventDefault(); patch({ unread: !m.unread }); }
   else if (k === 'r') { e.preventDefault(); hideCtxMenu(); const t = prompt('Rename chat:', m.title); if (t && t.trim()) H.sessionMeta(id, { title: t.trim() }).then((nm) => { if (nm) rec.meta = nm; renderSidebar(); updateTitlebar(); }); }
   else if (k === 'f') { e.preventDefault(); hideCtxMenu(); H.sessionFork(id).then(async (nm) => { if (nm) { await refreshSessions(); activate(nm.id); } }); }
+  else if (k === 'w') { e.preventDefault(); hideCtxMenu(); H.sessionWorktree(id).then(async (nm) => { if (nm && nm.error) return alert(nm.error); if (nm) { await refreshSessions(); activate(nm.id); } }); }
   else if (k === 'a') { e.preventDefault(); patch({ archived: !m.archived }); }
   else if (k === 'd') { e.preventDefault(); hideCtxMenu(); deleteSession(id, m.title); }
 }, true);
@@ -493,7 +500,12 @@ H.onSessionsUpdated(() => refreshSessions());
 
 // ---------------------------------------------------------------- send / stop
 async function sendText(rec, text, images, modelText) {
-  if (rec.streaming) { rec.queued.push({ text, images, modelText }); updateComposer(); return; }
+  if (rec.streaming) {
+    // steer the RUNNING turn (mid-task interjection); fall back to queueing
+    const st = await H.sessionSteer(rec.meta.id, modelText || text);
+    if (st && st.ok) { addUser(rec, '↳ ' + text, images ? images.length : 0); return; }
+    rec.queued.push({ text, images, modelText }); updateComposer(); return;
+  }
   rec.streaming = true; rec.cur = null;
   const r = await H.sessionSend(rec.meta.id, text, images && images.length ? images : undefined, modelText);
   if (r.ok) addUser(rec, text, images ? images.length : 0);
@@ -903,6 +915,16 @@ function respondApproval(ok) {
 }
 $('apAllow').onclick = () => respondApproval(true);
 $('apDeny').onclick = () => respondApproval(false);
+$('apAlways').onclick = () => {
+  const a = S.showingApproval; if (!a) return;
+  $('approvalModal').style.display = 'none';
+  H.respondApproval(a.id, true, true);
+  const rec = S.recs.get(a.sessionId);
+  if (rec) { rec.approvals = rec.approvals.filter((x) => x.id !== a.id); addLine(rec, 'done', '✓ rule saved: always allow "' + String(a.detail || '').split(/\s+/).slice(0, 2).join(' ') + '…" here'); }
+  S.showingApproval = null;
+  renderSidebar();
+  setTimeout(maybeShowApproval, 60);
+};
 document.addEventListener('keydown', (e) => {
   if ($('approvalModal').style.display !== 'flex') return;
   if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); respondApproval(true); }
@@ -927,6 +949,19 @@ $('panelClose').onclick = closePanel;
 function toggleDiff() { togglePanel('changes'); }
 $('diffToggle').onclick = toggleDiff;
 $('gitRefresh').onclick = () => refreshGit();
+$('gitCommitBtn').onclick = async () => {
+  const rec = active(); if (!rec) return;
+  const msg = prompt('Commit message:', 'Changes via Harness Code');
+  if (msg === null) return;
+  const r = await H.gitCommit(rec.meta.id, msg);
+  addLine(rec, r.error ? 'err' : 'done', r.error ? '⚠︎ ' + r.error : '✓ ' + r.out);
+  refreshGit();
+};
+$('gitPrBtn').onclick = async () => {
+  const rec = active(); if (!rec) return;
+  const r = await H.gitPr(rec.meta.id);
+  if (r.error) addLine(rec, 'err', '⚠︎ ' + r.error);
+};
 async function refreshGit() {
   const rec = active(); if (!rec) return;
   const st = await H.gitStatus(rec.meta.id);
@@ -1186,8 +1221,23 @@ async function chooseModel(v) {
 $('settingsBtn').onclick = () => {
   $('settingsSheet').style.display = 'flex';
   $('keyInput').value = '';
-  renderMcpList(); renderSkillsList(); renderPluginsList(); renderSpend();
+  renderMcpList(); renderSkillsList(); renderPluginsList(); renderSpend(); renderRules();
+  H.getConfig().then((c) => { $('sandboxToggle').checked = !!c.sandboxBash; });
 };
+$('sandboxToggle').onchange = () => H.setConfig({ sandboxBash: $('sandboxToggle').checked });
+async function renderRules() {
+  const rules = await H.rulesList();
+  const box = $('rulesList'); box.innerHTML = '';
+  if (!rules.length) { box.innerHTML = '<div class="muted">No rules yet — use "Always allow" on an approval prompt.</div>'; return; }
+  rules.forEach((r, i) => {
+    const row = document.createElement('div'); row.className = 'sl-row';
+    row.innerHTML = '<div class="sl-main"><b>' + esc(r.kind) + '</b> <span class="mi-hint mono">' + esc(r.prefix) + '…</span>' +
+      '<div class="mi-hint">' + (r.cwd ? esc(shortDir(r.cwd)) : 'all projects') + '</div></div>' +
+      '<button class="mini-btn">✕</button>';
+    row.querySelector('button').onclick = async () => { await H.ruleRemove(i); renderRules(); };
+    box.appendChild(row);
+  });
+}
 
 // AI spend (General section)
 function money(v) { return '$' + (v < 0.1 ? v.toFixed(4) : v.toFixed(2)); }
