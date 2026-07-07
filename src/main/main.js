@@ -75,6 +75,7 @@ function saveSession(rec) {
       },
       messages: rec.agent ? rec.agent.messages : (rec.savedMessages || []),
       transcript: rec.transcript,
+      checkpoints: (rec.checkpoints || []).slice(-10),
     }));
   } catch {}
 }
@@ -91,6 +92,7 @@ function loadSessionsFromDisk() {
         ...d.meta,
         usage: d.meta.usage || { prompt_tokens: 0, completion_tokens: 0, cost: 0 },
         agent: null, savedMessages: d.messages || [], transcript: d.transcript || [],
+        checkpoints: d.checkpoints || [],
         abort: null, cur: null,
       });
     } catch {}
@@ -117,6 +119,7 @@ function fetchModels(apiKey) {
             context: m.context_length || 0,
             pricing: m.pricing ? { prompt: Number(m.pricing.prompt) || 0, completion: Number(m.pricing.completion) || 0 } : null,
             reasoning: Array.isArray(m.supported_parameters) && m.supported_parameters.includes('reasoning'),
+            tools: Array.isArray(m.supported_parameters) && m.supported_parameters.includes('tools'),
           }));
           items.sort((a, z) => a.value.localeCompare(z.value));
           resolve(items);
@@ -133,7 +136,7 @@ async function getModels(force) {
     try {
       const c = JSON.parse(fs.readFileSync(modelsCachePath(), 'utf8'));
       // invalidate caches from before the per-model `reasoning` flag existed
-      if (c.items && c.items.length && c.items[0].reasoning !== undefined && Date.now() - c.fetchedAt < 24 * 3600 * 1000) {
+      if (c.items && c.items.length && c.items[0].reasoning !== undefined && c.items[0].tools !== undefined && Date.now() - c.fetchedAt < 24 * 3600 * 1000) {
         modelsMem = c.items;
         return modelsMem;
       }
@@ -153,6 +156,14 @@ function priceOf(model) {
 function supportsReasoning(model) {
   const m = (modelsMem || []).find((x) => x.value === model);
   return m ? !!m.reasoning : true;   // unknown model → don't block (OpenRouter drops the param anyway)
+}
+function supportsTools(model) {
+  const m = (modelsMem || []).find((x) => x.value === model);
+  return m ? !!m.tools : true;       // unknown model → assume native tool calling
+}
+function ctxLimitOf(model) {
+  const m = (modelsMem || []).find((x) => x.value === model);
+  return m && m.context ? m.context : 0;
 }
 
 // ---- agent event folding: mirror the live event stream into a compact transcript
@@ -176,6 +187,20 @@ function foldEvent(rec, e) {
   else if (e.type === 'diff') { rec.transcript.push({ t: 'diff', file: e.file, before: e.before, after: e.after }); }
   else if (e.type === 'auto_approved') { rec.transcript.push({ t: 'note', text: '⚡ auto-approved ' + e.kind + ': ' + String(e.detail || '').slice(0, 80) }); }
   else if (e.type === 'screenshot') { rec.transcript.push({ t: 'note', text: '📸 screenshot taken (not persisted)' }); }
+  else if (e.type === 'plan') {
+    // keep only the latest plan in the persisted transcript
+    rec.transcript = rec.transcript.filter((i) => i.t !== 'plan');
+    rec.transcript.push({ t: 'plan', items: e.items });
+  }
+  else if (e.type === 'snapshot') {
+    // checkpoint: remember each file's pre-change content once per turn (null = file was new)
+    if (rec.curCkpt && Object.keys(rec.curCkpt.files).length < 40) {
+      const abs = path.resolve(rec.cwd, e.path);
+      if (!(abs in rec.curCkpt.files) && (e.before === null || e.before.length <= 300000)) {
+        rec.curCkpt.files[abs] = e.before;
+      }
+    }
+  }
   else if (e.type === 'compacted') { flushAssistant(rec); rec.transcript.push({ t: 'note', text: '✦ context compacted' }); rec.updatedAt = Date.now(); saveSession(rec); }
   else if (e.type === 'done') {
     flushAssistant(rec);
@@ -211,6 +236,7 @@ function ensureAgent(rec) {
     rec.agent = new Session({
       apiKey: cfg.apiKey, model: rec.model, cwd: rec.cwd, mode: rec.mode, effort: rec.effort || null,
       goal: rec.goal || null,
+      textTools: !supportsTools(rec.model),
       extraTools: makeExtraTools(rec),
       emit: (e) => onAgentEvent(rec, e),
       approve: (kind, detail, opts = {}) => new Promise((resolve) => {
@@ -1110,7 +1136,7 @@ ipcMain.handle('session-config', (_e, { id, patch }) => {
   }
   saveConfig(cfg);
   if (rec.agent) {
-    if (patch.model) rec.agent.setModel(rec.model);
+    if (patch.model) { rec.agent.setModel(rec.model); rec.agent.textTools = !supportsTools(rec.model); }
     rec.agent.setMode(rec.mode);
     if (patch.cwd) rec.agent.setCwd(rec.cwd);
     rec.agent.setEffort(rec.effort || null);
@@ -1136,15 +1162,56 @@ ipcMain.handle('session-send', (_e, { id, text, images, modelText }) => {
   rec.updatedAt = Date.now();
   const agent = ensureAgent(rec);
   rec.abort = new AbortController();
+  rec.curCkpt = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5), ts: Date.now(), files: {} };
   sessionsChanged();
   const sendText = modelText || text;   // skills expand for the model; the transcript shows what was typed
   const payload = images && images.length ? { text: sendText, images } : sendText;
   (async () => {
-    try { await agent.send(payload, rec.abort.signal); }
+    try {
+      // auto-compact when the context window is ~75% full (like Claude Code)
+      const limit = ctxLimitOf(rec.model);
+      if (limit && rec.usage.context > 0.75 * limit && agent.messages.length > 8) {
+        rec.transcript.push({ t: 'note', text: '✦ context ~' + Math.round(rec.usage.context / limit * 100) + '% full — auto-compacting' });
+        sendToUI('agent-event', { sessionId: rec.id, type: 'control_note', message: '✦ context nearly full — auto-compacting first' });
+        try { await agent.compact(rec.abort.signal); } catch {}
+        rec.usage.context = 0;
+      }
+      await agent.send(payload, rec.abort.signal);
+    }
     catch (err) { onAgentEvent(rec, { type: 'error', message: String((err && err.message) || err) }); }
-    finally { rec.abort = null; saveSession(rec); sessionsChanged(); }
+    finally {
+      // finalize the turn's checkpoint if any files were touched
+      if (rec.curCkpt && Object.keys(rec.curCkpt.files).length) {
+        rec.checkpoints = (rec.checkpoints || []).slice(-19);
+        rec.checkpoints.push(rec.curCkpt);
+        rec.transcript.push({ t: 'ckpt', id: rec.curCkpt.id, files: Object.keys(rec.curCkpt.files).length });
+        sendToUI('agent-event', { sessionId: rec.id, type: 'checkpoint', ckptId: rec.curCkpt.id, files: Object.keys(rec.curCkpt.files).length });
+      }
+      rec.curCkpt = null;
+      rec.abort = null; saveSession(rec); sessionsChanged();
+    }
   })();
   return { ok: true };
+});
+
+// Rewind: restore every file a turn touched to its pre-turn contents.
+ipcMain.handle('session-revert', (_e, { id, ckptId }) => {
+  const rec = sessions.get(id);
+  if (!rec) return { ok: false, error: 'no session' };
+  const ck = (rec.checkpoints || []).find((c) => c.id === ckptId);
+  if (!ck) return { ok: false, error: 'checkpoint no longer available' };
+  let restored = 0, removed = 0, failed = 0;
+  for (const [abs, before] of Object.entries(ck.files)) {
+    try {
+      if (before === null) { if (fs.existsSync(abs)) { fs.unlinkSync(abs); removed++; } }
+      else { fs.mkdirSync(path.dirname(abs), { recursive: true }); fs.writeFileSync(abs, before); restored++; }
+    } catch { failed++; }
+  }
+  const msg = '⤺ reverted turn: ' + restored + ' file(s) restored' + (removed ? ', ' + removed + ' new file(s) removed' : '') + (failed ? ', ' + failed + ' failed' : '');
+  rec.transcript.push({ t: 'note', text: msg });
+  sendToUI('agent-event', { sessionId: rec.id, type: 'control_note', message: msg });
+  saveSession(rec);
+  return { ok: true, restored, removed, failed };
 });
 
 ipcMain.handle('session-abort', (_e, id) => {

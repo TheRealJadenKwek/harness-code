@@ -328,3 +328,13 @@ h3 { margin: 2px 0 4px; }
 .spend-bars { display: flex; gap: 3px; align-items: flex-end; height: 46px; max-width: 340px; padding: 2px 0 0; }
 .spend-bars .b { flex: 1; background: var(--text); opacity: .7; border-radius: 2px 2px 0 0; min-height: 2px; }
 .spend-bars .b:hover { opacity: 1; }
+
+/* live plan card */
+.plan { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 9px 13px; max-width: 640px; min-width: 260px; font-size: 13px; }
+.plan-title { font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin-bottom: 5px; }
+.plan-item { padding: 1.5px 0; }
+.plan-item.done { color: var(--muted); text-decoration: line-through; }
+
+/* checkpoint revert line */
+.ckpt { cursor: pointer; border-radius: 6px; padding: 2px 6px; margin-left: -6px; }
+.ckpt:hover { background: var(--panel2); color: var(--text); }

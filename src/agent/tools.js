@@ -141,11 +141,13 @@ function makeTools(ctx) {
       run: async ({ path: p, content }) => {
         const abs = inside(R(), p);
         if (!abs) return { error: 'path escapes the working directory' };
-        const before = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : '';
+        const existed = fs.existsSync(abs);
+        const before = existed ? fs.readFileSync(abs, 'utf8') : '';
         // Overwriting an existing non-empty file is the "messing up a good file" case.
         const danger = before.trim().length > 0;
         const ok = await ctx.approve('write', p + (danger ? '  (overwrites existing file)' : ''), { danger });
         if (!ok) return { error: 'denied by user' };
+        ctx.onSnapshot && ctx.onSnapshot(p, existed ? before : null);
         fs.mkdirSync(path.dirname(abs), { recursive: true });
         fs.writeFileSync(abs, content);
         ctx.onDiff && ctx.onDiff(p, before, content);
@@ -174,9 +176,28 @@ function makeTools(ctx) {
         const after = before.replace(old_string, new_string);
         const ok = await ctx.approve('edit', p);
         if (!ok) return { error: 'denied by user' };
+        ctx.onSnapshot && ctx.onSnapshot(p, before);
         fs.writeFileSync(abs, after);
         ctx.onDiff && ctx.onDiff(p, before, after);
         return { path: p, replaced: true };
+      },
+    },
+
+    update_plan: {
+      schema: {
+        name: 'update_plan',
+        description: 'Create or update your task checklist. Call this FIRST on multi-step tasks, then again whenever an item completes (done:true) or the plan changes. The user sees this live.',
+        parameters: { type: 'object', properties: {
+          items: { type: 'array', items: { type: 'object', properties: {
+            text: { type: 'string' }, done: { type: 'boolean' },
+          }, required: ['text'] } },
+        }, required: ['items'] },
+      },
+      run: async ({ items }) => {
+        const list = (Array.isArray(items) ? items : []).slice(0, 20)
+          .map((i) => ({ text: String(i.text || '').slice(0, 140), done: !!i.done }));
+        ctx.onPlan && ctx.onPlan(list);
+        return { ok: true, items: list.length };
       },
     },
 

@@ -17,7 +17,12 @@ Built from scratch (a real agent loop, not a wrapper). Electron GUI + a zero-dep
 - **Files panel** (⇧⌘F) — lazy project tree with read-only file preview. **⋮ menu**: Open in Finder / Terminal / VS Code, sessions folder.
 - **Five permission modes** per session, picked from a menu on the mode pill (1–5): 📋 Plan (read-only) / 🔨 Manual (approve everything) / ✎ Accept edits (file edits auto-approve, bash asks) / ⚡ Auto (routine work auto-approves) / ⚠ Bypass (everything auto-approves). The **destructive-action guard** (rm, resets, overwrites, sudo…) stops and asks in every mode except Bypass. Per-model trust memory: each model remembers the mode you last used with it.
 - **@-file mentions** with fuzzy autocomplete, **slash commands** (`/model`, `/mode`, `/dir`, `/clear`, `/compact`, `/rename`, `/diff`, `/help`).
-- **/compact** — summarize the session and compress the context, Claude Code style.
+- **/compact + auto-compaction** — manual or automatic at ~75% context fill; old tool outputs and stale screenshots are trimmed continuously.
+- **Live plan card** — the model maintains a visible checklist (`update_plan`) and ticks items off as it works.
+- **Checkpoints** — every turn that edits files gets a one-click "⤺ revert" that restores pre-turn contents (new files removed).
+- **Project memory** — `HARNESS.md` (or `AGENTS.md`/`CLAUDE.md`) in the working directory loads into the system prompt every turn.
+- **Works with non-tool-calling models** — a ReAct text protocol kicks in automatically for models without native function calling (detected from the catalog), so old/nostalgic models can still drive the full agent loop.
+- **Paste images** — ⌘V an image straight into the composer.
 - **Message queueing** — type while the agent is working; messages send when the turn ends.
 - **Model picker** (⌘K) — the full OpenRouter catalog (300+), searchable, with pricing and context length, cached for instant open. Type any model id, including ones not in the list.
 - **＋ attach menu** (⌘U) — add photos (sent to vision models as real image input), files (inserted as @mentions), or a folder; jump to slash commands.

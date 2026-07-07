@@ -23,7 +23,26 @@ class Session {
     //   { schemas: [openai fn schemas], has(name), run(name,args)->Promise<result>,
     //     gate(name,args) -> {kind,detail,danger} | null (null = no approval needed) }
     this.extraTools = opts.extraTools || null;
+    this.textTools = !!opts.textTools;   // ReAct-style text protocol for models without native tool calling
     this.messages = [this._sys()];
+  }
+
+  // Trim old context: stale tool outputs and all-but-recent screenshots dominate
+  // the window in long sessions; the model doesn't need them verbatim.
+  _trim() {
+    const keepFrom = Math.max(1, this.messages.length - 12);
+    let imgs = 0;
+    for (let i = this.messages.length - 1; i >= 1; i--) {
+      const m = this.messages[i];
+      if (Array.isArray(m.content)) {
+        if (m.content.some((c) => c.type === 'image_url')) {
+          imgs++;
+          if (imgs > 2) m.content = [{ type: 'text', text: '[earlier screenshot removed to save context]' }];
+        }
+      } else if (i < keepFrom && m.role === 'tool' && typeof m.content === 'string' && m.content.length > 1500) {
+        m.content = m.content.slice(0, 1500) + '…[trimmed]';
+      }
+    }
   }
 
   _sys() {
@@ -99,27 +118,37 @@ class Session {
       this.emit({ type: 'approval_request', kind, detail, danger });
       return this.approve(kind, detail, opts);
     };
+    this.messages[0] = this._sys();   // pick up HARNESS.md edits and mode changes every turn
     const { tools, schemas } = makeTools({
       cwd: this.cwd,
       approve: gatedApprove,
       onDiff: (file, before, after) => this.emit({ type: 'diff', file, before, after }),
+      onPlan: (items) => this.emit({ type: 'plan', items }),
+      onSnapshot: (p, before) => this.emit({ type: 'snapshot', path: p, before }),
     });
     // Plan mode advertises only read tools (browser_read is the one read-only extra).
     const extraSchemas = this.extraTools ? this.extraTools.schemas : [];
     const advertised = this.mode === 'plan'
-      ? [...schemas.filter((s) => ['read_file', 'list_dir', 'glob', 'grep'].includes(s.function.name)),
+      ? [...schemas.filter((s) => ['read_file', 'list_dir', 'glob', 'grep', 'update_plan'].includes(s.function.name)),
          ...extraSchemas.filter((s) => s.function.name === 'browser_read')]
       : [...schemas, ...extraSchemas];
+    // Text-protocol fallback: models without native tool calling get the schemas
+    // in the system prompt and reply with ```tool blocks we parse ourselves.
+    if (this.textTools) {
+      this.messages[0].content += '\n\n# TOOLS — TEXT PROTOCOL\nYou cannot call functions natively. To use a tool, reply with EXACTLY ONE fenced block and NOTHING else after it:\n```tool\n{"name": "<tool name>", "args": { ... }}\n```\nThen STOP. You will receive the result as the next message and can continue. When the task is complete, reply with your final answer and NO tool block.\n\nAvailable tools (JSON Schemas):\n' +
+        advertised.map((s) => JSON.stringify({ name: s.function.name, description: (s.function.description || '').slice(0, 200), parameters: s.function.parameters })).join('\n');
+    }
 
     let usageTotal = { prompt_tokens: 0, completion_tokens: 0, last_prompt: 0 };
     for (let step = 0; step < MAX_STEPS; step++) {
       if (signal && signal.aborted) { this.emit({ type: 'aborted' }); return; }
       this.emit({ type: 'turn_start', step });
+      this._trim();
       let res;
       try {
         res = await streamChat({
           apiKey: this.apiKey, baseUrl: this.baseUrl, model: this.model,
-          messages: this.messages, tools: advertised, signal,
+          messages: this.messages, tools: this.textTools ? null : advertised, signal,
           reasoning: this.effort ? { effort: this.effort } : null,
           onText: (d) => this.emit({ type: 'text', delta: d }),
           onReasoning: (d) => this.emit({ type: 'reasoning', delta: d }),
@@ -135,17 +164,36 @@ class Session {
         usageTotal.last_prompt = res.usage.prompt_tokens || usageTotal.last_prompt;
       }
 
+      // In text-protocol mode, parse a ```tool block out of the reply ourselves.
+      let toolCalls = res.tool_calls;
+      let textParseError = null;
+      if (this.textTools) {
+        toolCalls = [];
+        const m = (res.content || '').match(/```tool\s*\n([\s\S]*?)```/);
+        if (m) {
+          try {
+            const j = JSON.parse(m[1]);
+            if (j && j.name) toolCalls = [{ id: 'text-' + step, type: 'function', function: { name: j.name, arguments: JSON.stringify(j.args || j.arguments || {}) } }];
+            else textParseError = 'the tool block had no "name" field';
+          } catch (e) { textParseError = 'the tool block was not valid JSON: ' + e.message; }
+        }
+      }
+
       const assistantMsg = { role: 'assistant', content: res.content || '' };
-      if (res.tool_calls.length) assistantMsg.tool_calls = res.tool_calls;
+      if (!this.textTools && toolCalls.length) assistantMsg.tool_calls = toolCalls;
       this.messages.push(assistantMsg);
 
-      if (!res.tool_calls.length) {                 // final answer
+      if (textParseError) {
+        this.messages.push({ role: 'user', content: 'Your tool block failed to parse (' + textParseError + '). Reply with a corrected ```tool block, or your final answer with no tool block.' });
+        continue;
+      }
+      if (!toolCalls.length) {                 // final answer
         this.emit({ type: 'done', text: res.content, usage: usageTotal });
         return;
       }
 
       // Execute each tool call and append its result.
-      for (const tc of res.tool_calls) {
+      for (const tc of toolCalls) {
         let args = {};
         try { args = JSON.parse(tc.function.arguments || '{}'); } catch {}
         this.emit({ type: 'tool_call', name: tc.function.name, args });
@@ -173,10 +221,14 @@ class Session {
           delete result._image;
         }
         this.emit({ type: 'tool_result', name: tc.function.name, result });
-        this.messages.push({
-          role: 'tool', tool_call_id: tc.id, name: tc.function.name,
-          content: JSON.stringify(result).slice(0, 100000),
-        });
+        if (this.textTools) {
+          this.messages.push({ role: 'user', content: 'TOOL RESULT for ' + tc.function.name + ':\n' + JSON.stringify(result).slice(0, 20000) });
+        } else {
+          this.messages.push({
+            role: 'tool', tool_call_id: tc.id, name: tc.function.name,
+            content: JSON.stringify(result).slice(0, 100000),
+          });
+        }
         if (image) {
           this.messages.push({ role: 'user', content: [
             { type: 'text', text: '[Screenshot from ' + tc.function.name + ' — coordinates in this image are screen points you can click directly.]' },

@@ -164,8 +164,38 @@ function addDiff(rec, file, before, after) {
   logOf(rec).appendChild(el); scrollLog(rec);
 }
 
+// Live plan card: one per session, updated in place as the model checks items off.
+function renderPlan(rec, items) {
+  if (!rec.planEl || !rec.planEl.isConnected) {
+    rec.planEl = document.createElement('div');
+    rec.planEl.className = 'plan';
+    logOf(rec).appendChild(rec.planEl);
+  }
+  rec.planEl.innerHTML = '<div class="plan-title">☰ Plan</div>' +
+    items.map((i) => '<div class="plan-item' + (i.done ? ' done' : '') + '">' + (i.done ? '☑' : '☐') + ' ' + esc(i.text) + '</div>').join('');
+  scrollLog(rec);
+}
+
+// Checkpoint line: click to restore every file this turn touched.
+function addCkptLine(rec, ckptId, files) {
+  const el = document.createElement('div');
+  el.className = 'done ckpt';
+  el.textContent = '⤺ revert this turn’s file changes (' + files + ' file' + (files > 1 ? 's' : '') + ')';
+  el.title = 'Restores files changed by write/edit this turn. Bash side effects are not reverted.';
+  el.onclick = async () => {
+    if (!confirm('Revert ' + files + ' file change(s) from this turn?')) return;
+    const r = await H.sessionRevert(rec.meta.id, ckptId);
+    if (r && r.error) addLine(rec, 'err', '⚠︎ ' + r.error);
+    if (S.panel === 'changes') refreshGit();
+  };
+  logOf(rec).appendChild(el);
+  scrollLog(rec);
+}
+
 function renderItem(rec, item) {
   if (item.t === 'user') addUser(rec, item.text, item.images);
+  else if (item.t === 'plan') { renderPlan(rec, item.items); rec.planEl = null; }
+  else if (item.t === 'ckpt') addCkptLine(rec, item.id, item.files);
   else if (item.t === 'assistant') {
     const c = ensureAssistant(rec);
     if (item.think) { c.think.style.display = 'block'; c.thinkBody.textContent = item.think; }
@@ -427,6 +457,9 @@ H.onEvent((e) => {
   }
   else if (e.type === 'auto_approved') addLine(rec, 'done', '⚡ auto-approved ' + e.kind + ': ' + String(e.detail || '').slice(0, 80));
   else if (e.type === 'control_note') addLine(rec, 'done', e.message);
+  else if (e.type === 'plan') renderPlan(rec, e.items);
+  else if (e.type === 'checkpoint') addCkptLine(rec, e.ckptId, e.files);
+  else if (e.type === 'snapshot') { /* main-side checkpoint bookkeeping only */ }
   else if (e.type === 'screenshot') {
     const card = document.createElement('div'); card.className = 'shot';
     const img = document.createElement('img'); img.src = e.dataUrl;
@@ -618,6 +651,23 @@ function choosePopup(idx) {
 
 // ---------------------------------------------------------------- composer keys
 const input = $('input');
+// paste an image straight from the clipboard (⌘V) → attaches like the + menu does
+input.addEventListener('paste', (e) => {
+  const rec = active(); if (!rec) return;
+  for (const item of e.clipboardData.items) {
+    if (item.type && item.type.startsWith('image/')) {
+      e.preventDefault();
+      const f = item.getAsFile();
+      const fr = new FileReader();
+      fr.onload = () => {
+        rec.attachments = rec.attachments || [];
+        rec.attachments.push({ name: 'pasted image', dataUrl: fr.result });
+        renderAttachRow();
+      };
+      fr.readAsDataURL(f);
+    }
+  }
+});
 input.addEventListener('input', () => {
   input.style.height = 'auto'; input.style.height = Math.min(180, input.scrollHeight) + 'px';
   updatePopup();

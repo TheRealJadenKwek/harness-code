@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('harness', {
   sessionAbort: (id) => ipcRenderer.invoke('session-abort', id),
   sessionClear: (id) => ipcRenderer.invoke('session-clear', id),
   sessionCompact: (id) => ipcRenderer.invoke('session-compact', id),
+  sessionRevert: (id, ckptId) => ipcRenderer.invoke('session-revert', { id, ckptId }),
 
   // pickers / catalog / project
   pickDir: (id) => ipcRenderer.invoke('pick-dir', id),
