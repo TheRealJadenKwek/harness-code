@@ -199,6 +199,9 @@ function foldEvent(rec, e) {
 }
 function onAgentEvent(rec, e) {
   foldEvent(rec, e);
+  // the takeover overlay comes down the moment the controlling turn ends
+  if ((e.type === 'done' || e.type === 'error' || e.type === 'aborted') &&
+      typeof control !== 'undefined' && control && control.rec === rec) endControl();
   sendToUI('agent-event', Object.assign({ sessionId: rec.id }, e));
 }
 
@@ -208,7 +211,7 @@ function ensureAgent(rec) {
     rec.agent = new Session({
       apiKey: cfg.apiKey, model: rec.model, cwd: rec.cwd, mode: rec.mode, effort: rec.effort || null,
       goal: rec.goal || null,
-      extraTools: makeExtraTools(),
+      extraTools: makeExtraTools(rec),
       emit: (e) => onAgentEvent(rec, e),
       approve: (kind, detail, opts = {}) => new Promise((resolve) => {
         const aid = ++approvalSeq;
@@ -248,6 +251,7 @@ app.whenReady().then(() => {
   createWindow();
 });
 app.on('will-quit', () => {
+  if (typeof control !== 'undefined' && control) endControl();
   globalShortcut.unregisterAll();
   for (const c of mcpClients.values()) c.stop();
 });
@@ -592,6 +596,84 @@ const BROWSER_TOOLS = {
 // reads off the image are exactly the coordinates cliclick clicks. Click/type/key are
 // ALWAYS danger-gated (like applescript) — they can do anything the user can.
 const CLICLICK = '/opt/homebrew/bin/cliclick';
+// Native cursor helper: glides the REAL cursor with eased motion (Codex-style)
+// instead of teleporting. Falls back to cliclick if the binary is missing.
+const HC_CURSOR = path.join(__dirname, '../../assets/hc-cursor');
+const hasCursorHelper = () => { try { return fs.existsSync(HC_CURSOR); } catch { return false; } };
+function cursorCmd(args) {
+  return new Promise((resolve) => {
+    execFile(HC_CURSOR, args.map(String), { timeout: 20000 },
+      (err, so, se) => resolve(err ? { error: (se || err.message).slice(0, 200) + ' — needs Accessibility permission' } : { ok: true, out: (so || '').trim() }));
+  });
+}
+async function getCursorPos() {
+  if (hasCursorHelper()) {
+    const r = await cursorCmd(['pos']);
+    const m = (r.out || '').match(/(-?\d+),(-?\d+)/);
+    if (m) return { x: +m[1], y: +m[2] };
+  }
+  return null;
+}
+
+// ---- takeover UI: click-through overlay + user-movement / Esc abort ------------------
+let overlayWin = null;
+function showOverlay() {
+  if (overlayWin) { overlayWin.showInactive(); return; }
+  const { screen } = require('electron');
+  const b = screen.getPrimaryDisplay().bounds;
+  overlayWin = new BrowserWindow({
+    x: b.x, y: b.y, width: b.width, height: b.height,
+    transparent: true, frame: false, alwaysOnTop: true, hasShadow: false,
+    resizable: false, movable: false, focusable: false, skipTaskbar: true,
+  });
+  overlayWin.setAlwaysOnTop(true, 'screen-saver');
+  overlayWin.setIgnoreMouseEvents(true);
+  overlayWin.loadFile(path.join(__dirname, '../renderer/overlay.html'));
+  overlayWin.on('closed', () => { overlayWin = null; });
+}
+function hideOverlay() { if (overlayWin) { try { overlayWin.close(); } catch {} overlayWin = null; } }
+function overlayRipple(x, y) {
+  if (overlayWin) overlayWin.webContents.executeJavaScript('ripple(' + Math.round(x) + ',' + Math.round(y) + ')').catch(() => {});
+}
+
+let control = null;   // { rec, expected: {x,y}|null, busy: false, watcher: child, startedAt }
+function startControl(rec) {
+  if (control && control.rec === rec) return;
+  endControl();
+  control = { rec, expected: null, busy: false, watcher: null, startedAt: Date.now() };
+  showOverlay();
+  try { globalShortcut.register('Escape', () => abortControl('Esc pressed')); } catch {}
+  // Event-tap watcher: our synthetic events are tagged, so ANY untagged mouse event
+  // is the human — hand control back instantly, even mid-glide.
+  if (hasCursorHelper()) {
+    try {
+      const w = spawn(HC_CURSOR, ['watch'], { stdio: ['ignore', 'pipe', 'ignore'] });
+      control.watcher = w;
+      w.stdout.on('data', () => {
+        if (control && control.watcher === w && Date.now() - control.startedAt > 700) {
+          abortControl('you moved the mouse');
+        }
+      });
+      w.on('error', () => {});
+    } catch {}
+  }
+}
+function endControl() {
+  if (!control) return;
+  if (control.watcher) { try { control.watcher.kill(); } catch {} }
+  try { globalShortcut.unregister('Escape'); } catch {}
+  hideOverlay();
+  control = null;
+}
+function abortControl(why) {
+  const rec = control && control.rec;
+  endControl();
+  if (rec) {
+    rec.transcript.push({ t: 'note', text: '🖱 control returned — ' + why });
+    sendToUI('agent-event', { sessionId: rec.id, type: 'control_note', message: '🖱 control returned — ' + why });
+    if (rec.abort) rec.abort.abort();
+  }
+}
 function cli(args) {
   return new Promise((resolve) => {
     execFile(fs.existsSync(CLICLICK) ? CLICLICK : 'cliclick', args, { timeout: 15000 },
@@ -608,11 +690,15 @@ const COMPUTER_TOOLS = {
   computer_screenshot: {
     schema: { name: 'computer_screenshot', description: 'Capture the primary screen. The image is attached in the next message, sized in screen POINTS — a coordinate you read off the image is exactly the coordinate to click. Always take a fresh screenshot after each action to see the result.', parameters: { type: 'object', properties: {} } },
     gate: () => ({ kind: 'computer', detail: 'take a screenshot of the screen', danger: false }),
-    run: async () => {
+    run: async (a, rec) => {
       const { screen } = require('electron');
       const d = screen.getPrimaryDisplay();
       const tmp = path.join(app.getPath('temp'), 'hc-screen.png');
+      if (rec) { startControl(rec); control.busy = true; }
+      if (overlayWin) overlayWin.hide();   // the takeover banner must not appear in the shot
       await new Promise((res) => execFile('screencapture', ['-x', '-m', '-C', tmp], res));   // -C: cursor visible for aim-verification
+      if (overlayWin) overlayWin.showInactive();
+      if (control) control.busy = false;
       const imgW = Math.min(SHOT_MAX_W, d.size.width);
       shotScale = d.size.width / imgW;
       await new Promise((res) => execFile('sips', ['--resampleWidth', String(imgW), tmp], res));
@@ -628,7 +714,13 @@ const COMPUTER_TOOLS = {
       x: { type: 'integer' }, y: { type: 'integer' },
     }, required: ['x', 'y'] } },
     gate: (a) => ({ kind: 'computer', detail: 'move cursor to (' + a.x + ', ' + a.y + ')', danger: false }),
-    run: (a) => cli(['m:' + Math.round(a.x * shotScale) + ',' + Math.round(a.y * shotScale)]),
+    run: async (a, rec) => {
+      const sx = Math.round(a.x * shotScale), sy = Math.round(a.y * shotScale);
+      if (rec) { startControl(rec); control.busy = true; }
+      const r = hasCursorHelper() ? await cursorCmd(['move', sx, sy, 450]) : await cli(['m:' + sx + ',' + sy]);
+      if (control) { control.expected = { x: sx, y: sy }; control.busy = false; }
+      return r;
+    },
   },
   computer_click: {
     schema: { name: 'computer_click', description: 'Click at screen-point coordinates from the latest screenshot. For accuracy, prefer computer_move → screenshot (verify the visible cursor is on the target) → click at the same coordinates.', parameters: { type: 'object', properties: {
@@ -636,19 +728,33 @@ const COMPUTER_TOOLS = {
       double: { type: 'boolean' }, right: { type: 'boolean' },
     }, required: ['x', 'y'] } },
     gate: (a) => ({ kind: 'computer', detail: 'click at (' + a.x + ', ' + a.y + ')' + (a.double ? ' double' : a.right ? ' right' : ''), danger: true }),
-    run: (a) => cli([(a.double ? 'dc:' : a.right ? 'rc:' : 'c:') + Math.round(a.x * shotScale) + ',' + Math.round(a.y * shotScale)]),
+    run: async (a, rec) => {
+      const sx = Math.round(a.x * shotScale), sy = Math.round(a.y * shotScale);
+      if (rec) { startControl(rec); control.busy = true; }
+      let r;
+      if (hasCursorHelper()) r = await cursorCmd(['click', sx, sy, a.double ? 'double' : a.right ? 'right' : 'left', 450]);
+      else r = await cli([(a.double ? 'dc:' : a.right ? 'rc:' : 'c:') + sx + ',' + sy]);
+      overlayRipple(sx, sy);
+      if (control) { control.expected = { x: sx, y: sy }; control.busy = false; }
+      return r;
+    },
   },
   computer_type: {
     schema: { name: 'computer_type', description: 'Type text at the current focus (click the target field first).', parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } },
     gate: (a) => ({ kind: 'computer', detail: 'type: ' + String(a.text || '').slice(0, 80), danger: true }),
-    run: (a) => cli(['t:' + String(a.text || '')]),
+    run: async (a, rec) => {
+      if (rec) { startControl(rec); control.busy = true; }
+      const r = await cli(['t:' + String(a.text || '')]);
+      if (control) control.busy = false;
+      return r;
+    },
   },
   computer_key: {
     schema: { name: 'computer_key', description: 'Press a key, optionally with modifiers. Keys: return, esc, tab, space, delete, arrow-up/down/left/right, page-up, page-down, home, end, f1-f12. Modifiers: cmd, shift, alt, ctrl (comma-separated).', parameters: { type: 'object', properties: {
       key: { type: 'string' }, modifiers: { type: 'string', description: 'e.g. "cmd" or "cmd,shift"' },
     }, required: ['key'] } },
     gate: (a) => ({ kind: 'computer', detail: 'press ' + (a.modifiers ? a.modifiers + '+' : '') + a.key, danger: true }),
-    run: async (a) => {
+    run: async (a, rec) => {
       const key = KEY_MAP[String(a.key || '').toLowerCase()] || String(a.key || '').toLowerCase();
       const mods = String(a.modifiers || '').split(',').map((s) => s.trim()).filter(Boolean);
       // single printable character with modifiers → key-down mods, type char, key-up
@@ -656,7 +762,10 @@ const COMPUTER_TOOLS = {
       if (mods.length) args.push('kd:' + mods.join(','));
       args.push(/^[a-z0-9]$/.test(key) ? 't:' + key : 'kp:' + key);
       if (mods.length) args.push('ku:' + mods.join(','));
-      return cli(args);
+      if (rec) { startControl(rec); control.busy = true; }
+      const r = await cli(args);
+      if (control) control.busy = false;
+      return r;
     },
   },
   computer_open_app: {
@@ -666,7 +775,7 @@ const COMPUTER_TOOLS = {
   },
 };
 
-function makeExtraTools() {
+function makeExtraTools(rec) {
   return {
     get schemas() {
       const out = [...Object.values(BROWSER_TOOLS), ...Object.values(COMPUTER_TOOLS)].map((t) => ({ type: 'function', function: t.schema }));
@@ -704,7 +813,7 @@ function makeExtraTools() {
     },
     run(name, args) {
       if (BROWSER_TOOLS[name]) return BROWSER_TOOLS[name].run(args || {});
-      if (COMPUTER_TOOLS[name]) return COMPUTER_TOOLS[name].run(args || {});
+      if (COMPUTER_TOOLS[name]) return COMPUTER_TOOLS[name].run(args || {}, rec);
       const r = this._route(name);
       if (!r) return Promise.resolve({ error: 'unknown MCP tool: ' + name });
       return r.client.call(r.tool, args || {});

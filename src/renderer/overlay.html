@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><style>
+html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; pointer-events: none; user-select: none; }
+.frame {
+  position: fixed; inset: 0;
+  box-shadow: inset 0 0 0 3px rgba(224,144,47,.85), inset 0 0 44px rgba(224,144,47,.22);
+  animation: glow 1.6s ease-in-out infinite;
+}
+@keyframes glow { 50% { box-shadow: inset 0 0 0 3px rgba(224,144,47,.45), inset 0 0 26px rgba(224,144,47,.1); } }
+.banner {
+  position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+  background: rgba(22,22,25,.93); color: #f2f2ef;
+  font: 13px -apple-system, system-ui, sans-serif;
+  padding: 9px 18px; border-radius: 22px;
+  display: flex; gap: 9px; align-items: center;
+  box-shadow: 0 6px 28px rgba(0,0,0,.45);
+}
+.dot { width: 8px; height: 8px; border-radius: 50%; background: #e0902f; animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .25; } }
+.rip {
+  position: fixed; width: 14px; height: 14px;
+  border: 3px solid #e0902f; border-radius: 50%;
+  transform: translate(-50%, -50%);
+  animation: rip .7s ease-out forwards;
+}
+@keyframes rip { to { width: 70px; height: 70px; opacity: 0; } }
+</style></head>
+<body>
+  <div class="frame"></div>
+  <div class="banner"><span class="dot"></span> Harness Code is controlling your computer — move the mouse or press Esc to take back control</div>
+  <script>
+    function ripple(x, y) {
+      const d = document.createElement('div');
+      d.className = 'rip';
+      d.style.left = x + 'px'; d.style.top = y + 'px';
+      document.body.appendChild(d);
+      setTimeout(() => d.remove(), 800);
+    }
+  </script>
+</body>
+</html>

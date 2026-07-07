@@ -426,6 +426,7 @@ H.onEvent((e) => {
     }
   }
   else if (e.type === 'auto_approved') addLine(rec, 'done', '⚡ auto-approved ' + e.kind + ': ' + String(e.detail || '').slice(0, 80));
+  else if (e.type === 'control_note') addLine(rec, 'done', e.message);
   else if (e.type === 'screenshot') {
     const card = document.createElement('div'); card.className = 'shot';
     const img = document.createElement('img'); img.src = e.dataUrl;
