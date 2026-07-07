@@ -1,0 +1,32 @@
+{
+  "name": "harness-code",
+  "version": "0.1.0",
+  "description": "Your own OpenRouter coding agent, on the desktop.",
+  "main": "src/main/main.js",
+  "author": "Jaden Kwek",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "headless": "node run-headless.js",
+    "dist": "electron-builder --mac"
+  },
+  "build": {
+    "appId": "com.jadenkwek.harnesscode",
+    "productName": "Harness Code",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json",
+      "assets/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": "dir"
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}

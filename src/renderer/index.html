@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline';">
+  <link rel="stylesheet" href="styles.css">
+  <title>Harness Code</title>
+</head>
+<body>
+  <header class="titlebar">
+    <div class="brand">⬡ Harness Code</div>
+    <div class="ctx">
+      <button id="dirBtn" class="chip" title="Working directory">📁 <span id="dirLabel">…</span></button>
+      <button id="modelBtn" class="chip" title="Model">◆ <span id="modelLabel">…</span></button>
+      <button id="modeBtn" class="chip mode" title="Permission mode">🔨 Build</button>
+      <button id="newBtn" class="chip" title="New session">＋</button>
+      <button id="settingsBtn" class="chip" title="Settings">⚙</button>
+    </div>
+  </header>
+
+  <main id="log" class="log"></main>
+
+  <footer class="composer">
+    <textarea id="input" rows="1" placeholder="Ask Harness Code to build something…"></textarea>
+    <button id="sendBtn" class="send">↑</button>
+    <button id="stopBtn" class="send stop" style="display:none">■</button>
+  </footer>
+
+  <!-- Model search overlay -->
+  <div id="modelSheet" class="sheet" style="display:none">
+    <div class="sheet-inner">
+      <input id="modelSearch" placeholder="Search or type any model id…" autocomplete="off">
+      <div id="modelCount" class="muted"></div>
+      <div id="modelList" class="model-list"></div>
+      <button class="sheet-close" id="modelClose">Done</button>
+    </div>
+  </div>
+
+  <!-- Settings overlay -->
+  <div id="settingsSheet" class="sheet" style="display:none">
+    <div class="sheet-inner">
+      <h3>Settings</h3>
+      <label>OpenRouter API key</label>
+      <input id="keyInput" type="password" placeholder="sk-or-…" autocomplete="off">
+      <p class="muted">Stored locally on this Mac. Bootstrapped from your harness key if present.</p>
+      <div class="row">
+        <button id="keySave" class="primary">Save</button>
+        <button id="settingsClose" class="sheet-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Approval modal -->
+  <div id="approvalModal" class="modal" style="display:none">
+    <div class="modal-inner">
+      <div class="modal-title">Approve <span id="apKind"></span>?</div>
+      <pre id="apDetail" class="ap-detail"></pre>
+      <div class="row">
+        <button id="apDeny" class="danger">Deny</button>
+        <button id="apAllow" class="primary">Allow</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
