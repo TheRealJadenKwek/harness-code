@@ -426,6 +426,12 @@ H.onEvent((e) => {
     }
   }
   else if (e.type === 'auto_approved') addLine(rec, 'done', '⚡ auto-approved ' + e.kind + ': ' + String(e.detail || '').slice(0, 80));
+  else if (e.type === 'screenshot') {
+    const card = document.createElement('div'); card.className = 'shot';
+    const img = document.createElement('img'); img.src = e.dataUrl;
+    img.onclick = () => card.classList.toggle('big');
+    card.appendChild(img); logOf(rec).appendChild(card); scrollLog(rec);
+  }
   else if (e.type === 'diff') addDiff(rec, e.file, e.before, e.after);
   else if (e.type === 'done') {
     finalizeAssistant(rec);
@@ -1129,8 +1135,28 @@ async function chooseModel(v) {
 $('settingsBtn').onclick = () => {
   $('settingsSheet').style.display = 'flex';
   $('keyInput').value = '';
-  renderMcpList(); renderSkillsList(); renderPluginsList();
+  renderMcpList(); renderSkillsList(); renderPluginsList(); renderSpend();
 };
+
+// AI spend (General section)
+function money(v) { return '$' + (v < 0.1 ? v.toFixed(4) : v.toFixed(2)); }
+async function renderSpend() {
+  const s = await H.spendSummary();
+  if (!s) return;
+  $('spendGrid').innerHTML =
+    '<span>Today</span><span>' + money(s.today) + '</span>' +
+    '<span>This week</span><span>' + money(s.week) + '</span>' +
+    '<span>This month</span><span>' + money(s.month) + '</span>' +
+    '<span>YTD</span><span>' + money(s.ytd) + '</span>' +
+    '<span>All time</span><span>' + money(s.allTime) + ' <span class="mi-hint">Harness only</span></span>' +
+    (s.credits && s.credits.used != null
+      ? '<span>Account</span><span>' + money(s.credits.used) + (s.credits.total ? ' of $' + s.credits.total.toFixed(2) + ' credits' : '') + ' <span class="mi-hint">whole OpenRouter key</span></span>'
+      : '');
+  const max = Math.max(...s.bars.map((b) => b.cost), 0.0001);
+  $('spendBars').innerHTML = s.bars.map((b) =>
+    '<div class="b" style="height:' + Math.max(2, Math.round(b.cost / max * 100)) + '%" title="' + b.day + ' · ' + money(b.cost) + '"></div>'
+  ).join('');
+}
 $('settingsClose').onclick = () => { $('settingsSheet').style.display = 'none'; };
 $('sessionsFolderBtn').onclick = () => H.openSessionsFolder();
 $('keySave').onclick = async () => {

@@ -163,11 +163,27 @@ class Session {
             catch (e) { result = { error: String(e.message || e) }; }
           }
         } else result = { error: 'unknown tool: ' + tc.function.name };
+        // Tool results are text-only in the OpenAI format. When a tool returns an
+        // image (computer_screenshot), strip it from the result and inject it as a
+        // follow-up user message so vision models actually SEE it.
+        let image = null;
+        if (result && result._image) {
+          image = result._image;
+          result = { ...result };
+          delete result._image;
+        }
         this.emit({ type: 'tool_result', name: tc.function.name, result });
         this.messages.push({
           role: 'tool', tool_call_id: tc.id, name: tc.function.name,
           content: JSON.stringify(result).slice(0, 100000),
         });
+        if (image) {
+          this.messages.push({ role: 'user', content: [
+            { type: 'text', text: '[Screenshot from ' + tc.function.name + ' — coordinates in this image are screen points you can click directly.]' },
+            { type: 'image_url', image_url: { url: image } },
+          ] });
+          this.emit({ type: 'screenshot', dataUrl: image });
+        }
       }
     }
     this.emit({ type: 'error', message: 'stopped after ' + MAX_STEPS + ' steps (loop guard)' });

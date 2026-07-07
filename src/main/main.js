@@ -175,6 +175,7 @@ function foldEvent(rec, e) {
   }
   else if (e.type === 'diff') { rec.transcript.push({ t: 'diff', file: e.file, before: e.before, after: e.after }); }
   else if (e.type === 'auto_approved') { rec.transcript.push({ t: 'note', text: '⚡ auto-approved ' + e.kind + ': ' + String(e.detail || '').slice(0, 80) }); }
+  else if (e.type === 'screenshot') { rec.transcript.push({ t: 'note', text: '📸 screenshot taken (not persisted)' }); }
   else if (e.type === 'compacted') { flushAssistant(rec); rec.transcript.push({ t: 'note', text: '✦ context compacted' }); rec.updatedAt = Date.now(); saveSession(rec); }
   else if (e.type === 'done') {
     flushAssistant(rec);
@@ -183,7 +184,11 @@ function foldEvent(rec, e) {
       rec.usage.completion_tokens += e.usage.completion_tokens || 0;
       if (e.usage.last_prompt) rec.usage.context = e.usage.last_prompt;   // ≈ current context size
       const p = priceOf(rec.model);
-      if (p) rec.usage.cost += (e.usage.prompt_tokens || 0) * p.prompt + (e.usage.completion_tokens || 0) * p.completion;
+      if (p) {
+        const turnCost = (e.usage.prompt_tokens || 0) * p.prompt + (e.usage.completion_tokens || 0) * p.completion;
+        rec.usage.cost += turnCost;
+        addSpend(turnCost);
+      }
       rec.transcript.push({ t: 'note', text: 'done · ~' + ((e.usage.prompt_tokens || 0) + (e.usage.completion_tokens || 0)).toLocaleString() + ' tokens' });
     }
     rec.updatedAt = Date.now();
@@ -582,10 +587,89 @@ const BROWSER_TOOLS = {
     },
   },
 };
+// ---- pixel-level computer use: screenshot → vision → click/type loop ------------------
+// The screenshot is downscaled to LOGICAL screen points, so coordinates the model
+// reads off the image are exactly the coordinates cliclick clicks. Click/type/key are
+// ALWAYS danger-gated (like applescript) — they can do anything the user can.
+const CLICLICK = '/opt/homebrew/bin/cliclick';
+function cli(args) {
+  return new Promise((resolve) => {
+    execFile(fs.existsSync(CLICLICK) ? CLICLICK : 'cliclick', args, { timeout: 15000 },
+      (err, so, se) => resolve(err ? { error: (se || err.message).slice(0, 300) + ' — cliclick needs Accessibility permission (System Settings → Privacy)' } : { ok: true, out: (so || '').trim() }));
+  });
+}
+const KEY_MAP = { enter: 'return', escape: 'esc', backspace: 'delete', pageup: 'page-up', pagedown: 'page-down', up: 'arrow-up', down: 'arrow-down', left: 'arrow-left', right: 'arrow-right' };
+// Vision models point much more accurately on ~1500px images (providers downscale
+// bigger ones anyway, wrecking coordinate precision). We send a small image and
+// scale the model's coordinates back to screen points before clicking.
+let shotScale = 1;
+const SHOT_MAX_W = 1512;
+const COMPUTER_TOOLS = {
+  computer_screenshot: {
+    schema: { name: 'computer_screenshot', description: 'Capture the primary screen. The image is attached in the next message, sized in screen POINTS — a coordinate you read off the image is exactly the coordinate to click. Always take a fresh screenshot after each action to see the result.', parameters: { type: 'object', properties: {} } },
+    gate: () => ({ kind: 'computer', detail: 'take a screenshot of the screen', danger: false }),
+    run: async () => {
+      const { screen } = require('electron');
+      const d = screen.getPrimaryDisplay();
+      const tmp = path.join(app.getPath('temp'), 'hc-screen.png');
+      await new Promise((res) => execFile('screencapture', ['-x', '-m', '-C', tmp], res));   // -C: cursor visible for aim-verification
+      const imgW = Math.min(SHOT_MAX_W, d.size.width);
+      shotScale = d.size.width / imgW;
+      await new Promise((res) => execFile('sips', ['--resampleWidth', String(imgW), tmp], res));
+      let buf;
+      try { buf = fs.readFileSync(tmp); } catch { buf = null; }
+      if (!buf || buf.length < 5000) return { error: 'screenshot failed — grant Screen Recording permission to Harness Code (System Settings → Privacy & Security)' };
+      return { ok: true, width: imgW, height: Math.round(d.size.height / shotScale), note: 'screenshot attached below — click using coordinates as seen in this image',
+        _image: 'data:image/png;base64,' + buf.toString('base64') };
+    },
+  },
+  computer_move: {
+    schema: { name: 'computer_move', description: 'Move the mouse cursor to coordinates from the latest screenshot WITHOUT clicking. Best practice for accuracy: move, take a screenshot (the cursor is visible in it) to verify you are on the target, adjust if needed, THEN click.', parameters: { type: 'object', properties: {
+      x: { type: 'integer' }, y: { type: 'integer' },
+    }, required: ['x', 'y'] } },
+    gate: (a) => ({ kind: 'computer', detail: 'move cursor to (' + a.x + ', ' + a.y + ')', danger: false }),
+    run: (a) => cli(['m:' + Math.round(a.x * shotScale) + ',' + Math.round(a.y * shotScale)]),
+  },
+  computer_click: {
+    schema: { name: 'computer_click', description: 'Click at screen-point coordinates from the latest screenshot. For accuracy, prefer computer_move → screenshot (verify the visible cursor is on the target) → click at the same coordinates.', parameters: { type: 'object', properties: {
+      x: { type: 'integer' }, y: { type: 'integer' },
+      double: { type: 'boolean' }, right: { type: 'boolean' },
+    }, required: ['x', 'y'] } },
+    gate: (a) => ({ kind: 'computer', detail: 'click at (' + a.x + ', ' + a.y + ')' + (a.double ? ' double' : a.right ? ' right' : ''), danger: true }),
+    run: (a) => cli([(a.double ? 'dc:' : a.right ? 'rc:' : 'c:') + Math.round(a.x * shotScale) + ',' + Math.round(a.y * shotScale)]),
+  },
+  computer_type: {
+    schema: { name: 'computer_type', description: 'Type text at the current focus (click the target field first).', parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } },
+    gate: (a) => ({ kind: 'computer', detail: 'type: ' + String(a.text || '').slice(0, 80), danger: true }),
+    run: (a) => cli(['t:' + String(a.text || '')]),
+  },
+  computer_key: {
+    schema: { name: 'computer_key', description: 'Press a key, optionally with modifiers. Keys: return, esc, tab, space, delete, arrow-up/down/left/right, page-up, page-down, home, end, f1-f12. Modifiers: cmd, shift, alt, ctrl (comma-separated).', parameters: { type: 'object', properties: {
+      key: { type: 'string' }, modifiers: { type: 'string', description: 'e.g. "cmd" or "cmd,shift"' },
+    }, required: ['key'] } },
+    gate: (a) => ({ kind: 'computer', detail: 'press ' + (a.modifiers ? a.modifiers + '+' : '') + a.key, danger: true }),
+    run: async (a) => {
+      const key = KEY_MAP[String(a.key || '').toLowerCase()] || String(a.key || '').toLowerCase();
+      const mods = String(a.modifiers || '').split(',').map((s) => s.trim()).filter(Boolean);
+      // single printable character with modifiers → key-down mods, type char, key-up
+      const args = [];
+      if (mods.length) args.push('kd:' + mods.join(','));
+      args.push(/^[a-z0-9]$/.test(key) ? 't:' + key : 'kp:' + key);
+      if (mods.length) args.push('ku:' + mods.join(','));
+      return cli(args);
+    },
+  },
+  computer_open_app: {
+    schema: { name: 'computer_open_app', description: 'Open (or bring to front) a macOS application by name, e.g. "Safari", "Finder".', parameters: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
+    gate: (a) => ({ kind: 'computer', detail: 'open app: ' + (a.name || ''), danger: false }),
+    run: (a) => new Promise((resolve) => execFile('open', ['-a', String(a.name || '')], (err) => resolve(err ? { error: 'no such app: ' + a.name } : { ok: true }))),
+  },
+};
+
 function makeExtraTools() {
   return {
     get schemas() {
-      const out = Object.values(BROWSER_TOOLS).map((t) => ({ type: 'function', function: t.schema }));
+      const out = [...Object.values(BROWSER_TOOLS), ...Object.values(COMPUTER_TOOLS)].map((t) => ({ type: 'function', function: t.schema }));
       for (const [srv, client] of mcpClients) {
         if (client.status !== 'running') continue;
         for (const t of client.tools) {
@@ -599,11 +683,12 @@ function makeExtraTools() {
       return out;
     },
     has(name) {
-      if (BROWSER_TOOLS[name]) return true;
+      if (BROWSER_TOOLS[name] || COMPUTER_TOOLS[name]) return true;
       return name.startsWith('mcp__') && this._route(name) !== null;
     },
     gate(name, args) {
       if (BROWSER_TOOLS[name]) return BROWSER_TOOLS[name].gate(args || {});
+      if (COMPUTER_TOOLS[name]) return COMPUTER_TOOLS[name].gate(args || {});
       return { kind: 'mcp', detail: name.replace(/^mcp__/, '').replace('__', ' → ') + ' ' + JSON.stringify(args || {}).slice(0, 160), danger: false };
     },
     _route(name) {
@@ -619,6 +704,7 @@ function makeExtraTools() {
     },
     run(name, args) {
       if (BROWSER_TOOLS[name]) return BROWSER_TOOLS[name].run(args || {});
+      if (COMPUTER_TOOLS[name]) return COMPUTER_TOOLS[name].run(args || {});
       const r = this._route(name);
       if (!r) return Promise.resolve({ error: 'unknown MCP tool: ' + name });
       return r.client.call(r.tool, args || {});
@@ -706,12 +792,66 @@ async function doAppshot() {
   if (win) { win.show(); win.focus(); }
 }
 
-// ---- OpenRouter credits (for the usage popover), cached 60s -----------------------
+// ---- local AI-spend ledger: one number per local day, written on every turn -------
+const spendPath = () => path.join(app.getPath('userData'), 'spend.json');
+function localDay(dt) {
+  return dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0');
+}
+function loadSpend() {
+  try { return JSON.parse(fs.readFileSync(spendPath(), 'utf8')); } catch {}
+  // First run: seed from existing sessions, attributing each session's recorded
+  // cost to its last-active day (approximate, but better than starting at zero).
+  const days = {};
+  for (const rec of sessions.values()) {
+    if (rec.usage && rec.usage.cost) {
+      const d = localDay(new Date(rec.updatedAt || Date.now()));
+      days[d] = (days[d] || 0) + rec.usage.cost;
+    }
+  }
+  const s = { days };
+  try { fs.writeFileSync(spendPath(), JSON.stringify(s)); } catch {}
+  return s;
+}
+function addSpend(cost) {
+  if (!cost || cost <= 0) return;
+  const s = loadSpend();
+  const d = localDay(new Date());
+  s.days[d] = (s.days[d] || 0) + cost;
+  try { fs.writeFileSync(spendPath(), JSON.stringify(s)); } catch {}
+}
+ipcMain.handle('spend-summary', async () => {
+  const s = loadSpend();
+  const now = new Date();
+  const today = localDay(now);
+  const monday = new Date(now); monday.setDate(now.getDate() - ((now.getDay() + 6) % 7)); monday.setHours(0, 0, 0, 0);
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const yearStart = new Date(now.getFullYear(), 0, 1);
+  const sums = { today: 0, week: 0, month: 0, ytd: 0, allTime: 0 };
+  for (const [day, cost] of Object.entries(s.days)) {
+    const dt = new Date(day + 'T12:00:00');
+    sums.allTime += cost;
+    if (day === today) sums.today += cost;
+    if (dt >= monday) sums.week += cost;
+    if (dt >= monthStart) sums.month += cost;
+    if (dt >= yearStart) sums.ytd += cost;
+  }
+  // last 14 days for the mini bar chart
+  const bars = [];
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date(now); d.setDate(now.getDate() - i);
+    const key = localDay(d);
+    bars.push({ day: key, cost: s.days[key] || 0 });
+  }
+  const credits = await getCredits();
+  return { ...sums, bars, credits };
+});
+
+// ---- OpenRouter credits (usage popover + spend page), cached 60s -------------------
 let creditsCache = { at: 0, data: null };
-ipcMain.handle('credits', () => {
-  if (Date.now() - creditsCache.at < 60000 && creditsCache.data) return creditsCache.data;
+function getCredits() {
+  if (Date.now() - creditsCache.at < 60000 && creditsCache.data) return Promise.resolve(creditsCache.data);
   const cfg = loadConfig();
-  if (!cfg.apiKey) return null;
+  if (!cfg.apiKey) return Promise.resolve(null);
   return new Promise((resolve) => {
     const req = https.request({
       method: 'GET', hostname: 'openrouter.ai', path: '/api/v1/credits',
@@ -730,7 +870,8 @@ ipcMain.handle('credits', () => {
     req.on('error', () => resolve(null));
     req.end();
   });
-});
+}
+ipcMain.handle('credits', () => getCredits());
 
 // ---- attach files/photos from the + menu ------------------------------------------
 const IMG_EXT = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];

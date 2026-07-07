@@ -318,3 +318,13 @@ h3 { margin: 2px 0 4px; }
 .s-unread { color: var(--blue); font-size: 9px; vertical-align: 2px; }
 .ctx-menu { position: fixed; min-width: 210px; }
 .menu-item.ctx-danger { color: var(--red); }
+
+/* screenshot cards from computer use */
+.shot { align-self: flex-start; max-width: 480px; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; cursor: zoom-in; }
+.shot.big { max-width: 100%; cursor: zoom-out; }
+.shot img { display: block; width: 100%; }
+
+/* spend mini bars */
+.spend-bars { display: flex; gap: 3px; align-items: flex-end; height: 46px; max-width: 340px; padding: 2px 0 0; }
+.spend-bars .b { flex: 1; background: var(--text); opacity: .7; border-radius: 2px 2px 0 0; min-height: 2px; }
+.spend-bars .b:hover { opacity: 1; }

@@ -27,7 +27,8 @@ Built from scratch (a real agent loop, not a wrapper). Electron GUI + a zero-dep
 - **Skills** — markdown playbooks in `~/.harness-code/skills/`, invoked as `/name` from the composer.
 - **Plugins** — installable bundles of skills + MCP servers (`plugin.json` + `skills/*.md`), from a local folder or git URL; toggle from the ＋ menu or Settings. Plugin servers run with cwd = the plugin folder and may use `${PLUGIN_DIR}`.
 - **Agent browser** — `browser_open/read/click/fill/eval` tools drive the visible Preview panel, so you watch the model browse.
-- **Computer use** — an `applescript` tool lets the model control other Mac apps; always requires explicit approval, even in Auto.
+- **Computer use** — pixel-level: `computer_screenshot` (vision), `computer_move`/`computer_click`/`computer_type`/`computer_key`/`computer_open_app` (via cliclick), plus an `applescript` tool. Screenshots go to the model as real images with coordinate scaling handled; clicks/typing are always danger-gated. Best with vision models trained for pointing (Claude); expect an iterative move→verify→click loop.
+- **AI spend** (Settings → General) — today / week / month / YTD / all-time from a local per-turn ledger, 14-day bars, plus your account-wide OpenRouter usage.
 - **Appshots** — press ⌘⇧H anywhere to capture the screen and attach it to the active chat (needs Screen Recording permission).
 - **/fork · /goal · /loop** — duplicate a session with full history, pin a standing goal into the system prompt, or re-run a prompt on an interval.
 - **Monochrome UI, light & dark** — follows the system theme.
