@@ -77,8 +77,15 @@ class Session {
   _estTokens() {
     let n = 2700;   // system prompt + tool schemas overhead
     for (const m of this.messages) {
-      // 3.2 chars/token: code and JSON tokenize much denser than prose
-      n += (typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content || '').length) / 3.2 + 10;
+      if (typeof m.content === 'string') {
+        n += m.content.length / 3.2 + 10;   // 3.2 chars/token: code tokenizes densely
+      } else if (Array.isArray(m.content)) {
+        for (const part of m.content) {
+          if (part.type === 'image_url') n += 1300;   // vision images are TILED (~85–1600 tok), not tokenized as base64
+          else n += String(part.text || '').length / 3.2;
+        }
+        n += 10;
+      }
     }
     return Math.round(n);
   }
@@ -100,6 +107,20 @@ class Session {
     const limit = this.ctxLimit || 0;
     if (!limit) return;
     const budget = Math.max(2500, limit * 0.62);   // leave completion + estimator-error headroom
+    if (this._estTokens() <= budget) return;
+    // pass 1: images are ~50k tokens each — strip them (except the newest user
+    // message's) before sacrificing any conversation history
+    let lastUser = -1;
+    for (let i = this.messages.length - 1; i > 0; i--) if (this.messages[i].role === 'user') { lastUser = i; break; }
+    let strippedImgs = 0;
+    for (let i = 1; i < this.messages.length && this._estTokens() > budget; i++) {
+      const m = this.messages[i];
+      if (i !== lastUser && Array.isArray(m.content) && m.content.some((c) => c.type === 'image_url')) {
+        m.content = [{ type: 'text', text: '[image removed to fit the context window]' }];
+        strippedImgs++;
+      }
+    }
+    if (strippedImgs) this.emit({ type: 'control_note', message: '✂ removed ' + strippedImgs + ' old image(s) to fit the context window' });
     if (this._estTokens() <= budget) return;
     let dropped = 0;
     while (this._estTokens() > budget && this.messages.length > 8) {
@@ -151,6 +172,21 @@ class Session {
   setMode(m) { this.mode = m; this.messages[0] = this._sys(); }
   setCwd(d) { this.cwd = d; this.messages[0] = this._sys(); }
   setGoal(g) { this.goal = g || null; this.messages[0] = this._sys(); }
+
+  // Rebuild model memory from the UI transcript (which never loses messages) —
+  // used when moving to a bigger-context model after heavy fitting shrank history.
+  rehydrate(items) {
+    const msgs = [this._sys()];
+    for (const it of items) {
+      if ((it.t === 'user' || it.t === 'assistant') && (it.text || '').trim()) {
+        msgs.push({ role: it.t, content: it.text });
+      }
+    }
+    if (msgs.length < 5) return false;
+    this.messages = msgs;
+    this._fit();
+    return true;
+  }
 
   // Restore a persisted conversation (message history saved to disk by the host).
   loadMessages(msgs) {

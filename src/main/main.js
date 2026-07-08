@@ -1608,7 +1608,19 @@ ipcMain.handle('session-config', (_e, { id, patch }) => {
   }
   saveConfig(cfg);
   if (rec.agent) {
-    if (patch.model) { rec.agent.setModel(rec.model); rec.agent.textTools = !supportsTools(rec.model); rec.agent.setCtxLimit(ctxLimitOf(rec.model)); }
+    if (patch.model) {
+      const oldLimit = rec.agent.ctxLimit || 0;
+      rec.agent.setModel(rec.model);
+      rec.agent.textTools = !supportsTools(rec.model);
+      rec.agent.setCtxLimit(ctxLimitOf(rec.model));
+      // moving up in context: refill the model's memory from the full transcript
+      if (ctxLimitOf(rec.model) > oldLimit * 1.5 && rec.agent.messages.length < rec.transcript.length / 3) {
+        if (rec.agent.rehydrate(rec.transcript)) {
+          rec.transcript.push({ t: 'note', text: '🧠 restored conversation memory from the transcript for the larger context window' });
+          sendToUI('agent-event', { sessionId: rec.id, type: 'control_note', message: '🧠 restored conversation memory from the transcript' });
+        }
+      }
+    }
     rec.agent.setMode(rec.mode);
     if (patch.cwd) rec.agent.setCwd(rec.cwd);
     rec.agent.setEffort(rec.effort || null);
@@ -1634,6 +1646,12 @@ function beginTurn(rec, { text, images, modelText, remote }) {
   if (remote) sendToUI('agent-event', { sessionId: rec.id, type: 'remote_user', text });
   rec.updatedAt = Date.now();
   const agent = ensureAgent(rec);
+  const convo = rec.transcript.filter((i) => i.t === 'user' || i.t === 'assistant').length;
+  if (convo > 16 && agent.messages.length < Math.min(30, convo / 4) && ctxLimitOf(rec.model) > 60000) {
+    if (agent.rehydrate(rec.transcript)) {
+      sendToUI('agent-event', { sessionId: rec.id, type: 'control_note', message: '🧠 restored conversation memory from the transcript' });
+    }
+  }
   rec.abort = new AbortController();
   rec.curCkpt = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5), ts: Date.now(), files: {} };
   sessionsChanged();
