@@ -1818,6 +1818,11 @@ ipcMain.handle('git-diff', async (_e, { id, file }) => {
   return { diff: r.so.slice(0, 300000) };
 });
 
+ipcMain.handle('reveal-file', (_e, p) => {
+  if (typeof p === 'string' && p.startsWith('/') && fs.existsSync(p)) shell.showItemInFolder(p);
+  return { ok: true };
+});
+
 ipcMain.handle('clipboard-write', (_e, t) => {
   const { clipboard } = require('electron');
   clipboard.writeText(String(t || ''));

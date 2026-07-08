@@ -48,6 +48,7 @@ function md(src) {
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, '$1<em>$2</em>');
   s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" class="ext">$1</a>');
+  s = s.replace(/\[([^\]]+)\]\((?:sandbox:|file:\/\/)?(\/[^)\s]+)\)/g, '<a class="reveal" data-p="$2">$1 ↗</a>');
   s = s.replace(/^(\s*)[-*] /gm, '$1• ');
   s = s.replace(/\uE000(\d+)\uE001/g, (_, i) => blocks[+i]);
   s = s.replace(/<\/(h2|h3|h4|pre)>\n/g, '</$1>');
@@ -56,6 +57,8 @@ function md(src) {
 document.addEventListener('click', (e) => {
   const a = e.target.closest && e.target.closest('a.ext');
   if (a) { e.preventDefault(); H.openExternal(a.href); }
+  const r = e.target.closest && e.target.closest('a.reveal');
+  if (r) { e.preventDefault(); H.revealFile(r.dataset.p); }
 });
 
 // ---------------------------------------------------------------- chat rendering
