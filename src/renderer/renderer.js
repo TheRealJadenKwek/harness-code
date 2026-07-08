@@ -282,6 +282,62 @@ function renderSidebar() {
     h.onclick = () => { S.showArchived = !S.showArchived; renderSidebar(); };
     if (S.showArchived) arch.forEach((r) => box.appendChild(sessEl(r)));
   }
+  // read-only CLI sessions (claude / codex desktop CLIs), live-tailed
+  const ch = header((S.showCli ? '▾' : '▸') + ' CLI sessions');
+  ch.classList.add('clickable');
+  ch.onclick = async () => { S.showCli = !S.showCli; if (S.showCli) S.cliList = await H.cliSessions(); renderSidebar(); };
+  if (S.showCli) {
+    for (const cs of (S.cliList || [])) {
+      const el = document.createElement('div');
+      el.className = 'sess' + (S.cliView && S.cliView.path === cs.path ? ' active' : '');
+      el.innerHTML = '<div class="s-title">' + (cs.engine === 'claude' ? '✳ ' : '⌬ ') + esc(cs.title) + '</div>' +
+        '<div class="s-sub">' + esc(cs.engine) + ' cli · ' + timeAgo(cs.updated) + ' · read-only</div>';
+      el.onclick = () => openCliView(cs.path);
+      box.appendChild(el);
+    }
+    if (!(S.cliList || []).length) { const d = document.createElement('div'); d.className = 'git-empty'; d.textContent = 'No CLI sessions found.'; box.appendChild(d); }
+  }
+}
+
+// ---- read-only CLI session viewer -----------------------------------------------
+function closeCliView() {
+  if (!S.cliView) return;
+  clearInterval(S.cliView.timer);
+  if (S.cliView.el) S.cliView.el.remove();
+  S.cliView = null;
+  for (const [rid, r] of S.recs) r.logEl.classList.toggle('active', rid === S.active);
+  $('input').disabled = false;
+  showSuggestion(active());
+  renderSidebar();
+}
+async function openCliView(fp) {
+  closeCliView();
+  const el = document.createElement('div');
+  el.className = 'log active';
+  $('logs').appendChild(el);
+  for (const [, r] of S.recs) r.logEl.classList.remove('active');
+  S.cliView = { path: fp, el, mtime: 0, timer: null };
+  $('input').disabled = true;
+  $('input').placeholder = 'read-only CLI session — press Esc to return to your chats';
+  const render = async () => {
+    const d = await H.cliSessionGet(fp);
+    if (!d || !S.cliView || S.cliView.path !== fp) return;
+    if (d.updated === S.cliView.mtime) return;
+    S.cliView.mtime = d.updated;
+    const stick = atBottom(el);
+    el.innerHTML = '';
+    const ban = document.createElement('div'); ban.className = 'done';
+    ban.textContent = '👁 read-only ' + d.engine + ' CLI session · ' + shortDir(d.cwd) + ' · updates live · Esc to close';
+    el.appendChild(ban);
+    for (const m of (d.messages || [])) {
+      if (m.role === 'user') { const u = document.createElement('div'); u.className = 'msg user'; u.textContent = m.text; el.appendChild(u); }
+      else { const a = document.createElement('div'); a.className = 'msg assistant'; const t = document.createElement('div'); t.className = 'md'; t.innerHTML = md(m.text); a.appendChild(t); el.appendChild(a); }
+    }
+    if (stick || !el.dataset.scrolled) { el.scrollTop = el.scrollHeight; el.dataset.scrolled = '1'; }
+  };
+  await render();
+  S.cliView.timer = setInterval(render, 2000);
+  renderSidebar();
 }
 
 // ---- right-click context menu on chats -------------------------------------------
@@ -380,6 +436,7 @@ document.addEventListener('keydown', (e) => {
 
 async function activate(id) {
   if (!S.recs.has(id)) return;
+  closeCliView();
   S.active = id;
   for (const [rid, rec] of S.recs) rec.logEl.classList.toggle('active', rid === id);
   const rec = S.recs.get(id);
@@ -1487,6 +1544,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'Escape' && $('approvalModal').style.display !== 'flex') {
     if ($('modelSheet').style.display === 'flex') $('modelSheet').style.display = 'none';
     else if ($('settingsSheet').style.display === 'flex') $('settingsSheet').style.display = 'none';
+    else if (S.cliView) closeCliView();
   }
 });
 

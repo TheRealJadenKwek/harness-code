@@ -1203,6 +1203,129 @@ function startApiServer() {
   srv.listen(ports[0], '127.0.0.1');
 }
 
+
+// ---- read-only CLI session viewer: browse claude/codex desktop-CLI transcripts ------
+// (ports of the harness server's parsers; live-tailed by the renderer via polling)
+const CLAUDE_SESS = path.join(app.getPath('home'), '.claude', 'projects');
+const CODEX_SESS = path.join(app.getPath('home'), '.codex', 'sessions');
+
+// Bounded reads — CLI transcripts can be hundreds of MB; never load them whole.
+function readSlice(file, start, bytes) {
+  try {
+    const fd = fs.openSync(file, 'r');
+    const b = Buffer.alloc(bytes);
+    const n = fs.readSync(fd, b, 0, bytes, start);
+    fs.closeSync(fd);
+    return b.slice(0, n).toString('utf8');
+  } catch { return ''; }
+}
+function cliLines(file, full) {
+  let size = 0;
+  try { size = fs.statSync(file).size; } catch { return null; }
+  const head = readSlice(file, 0, 256 * 1024).split('\n');
+  if (!full || size <= 256 * 1024) return head;
+  const tailStart = Math.max(0, size - 2 * 1024 * 1024);
+  const tail = readSlice(file, tailStart, 2 * 1024 * 1024).split('\n').slice(1);   // drop partial first line
+  return head.slice(0, 200).concat(tail);
+}
+function parseClaudeCli(file, full) {
+  let cwd = null, title = null, turns = 0;
+  const messages = [];
+  const lines = cliLines(file, full);
+  if (!lines) return null;
+  const limit = full ? 6000 : 400;
+  for (let i = 0; i < Math.min(lines.length, limit); i++) {
+    let d; try { d = JSON.parse(lines[i]); } catch { continue; }
+    if (d.isSidechain) continue;
+    if (!cwd && d.cwd) cwd = d.cwd;
+    if (d.type !== 'user' && d.type !== 'assistant') continue;
+    const m = d.message || {};
+    let c = m.content;
+    if (Array.isArray(c)) c = c.filter((b) => b && b.type === 'text').map((b) => b.text || '').join(' ');
+    if (typeof c !== 'string' || !c.trim()) continue;
+    turns++;
+    if (d.type === 'user' && !title && !c.trim().startsWith('<')) title = c.trim().replace(/\s+/g, ' ').slice(0, 60);
+    if (full) messages.push({ role: d.type, text: c.slice(0, 6000) });
+  }
+  const out = { engine: 'claude', path: file, cwd: cwd || app.getPath('home'),
+    title: title || ('Claude session ' + path.basename(file).slice(0, 8)),
+    updated: 0, turns };
+  try { out.updated = fs.statSync(file).mtimeMs; } catch {}
+  if (full) out.messages = messages.slice(-120);
+  return out;
+}
+
+function parseCodexCli(file, full) {
+  let cwd = null, title = null, turns = 0;
+  const messages = [];
+  const lines = cliLines(file, full);
+  if (!lines) return null;
+  const limit = full ? 6000 : 500;
+  for (let i = 0; i < Math.min(lines.length, limit); i++) {
+    let d; try { d = JSON.parse(lines[i]); } catch { continue; }
+    const pl = d.payload || {};
+    if ((d.type === 'session_meta' || pl.type === 'session_meta') && !cwd) cwd = pl.cwd || cwd;
+    if (pl.type === 'turn_context' && !cwd) cwd = pl.cwd;
+    if (d.type === 'response_item' && pl.type === 'message') {
+      const role = pl.role;
+      if (role !== 'user' && role !== 'assistant') continue;
+      const txt = (pl.content || []).filter((b) => b && ['input_text', 'output_text', 'text'].includes(b.type)).map((b) => b.text || '').join(' ');
+      if (!txt.trim()) continue;
+      turns++;
+      if (role === 'user' && !title && !txt.trim().startsWith('<')) title = txt.trim().replace(/\s+/g, ' ').slice(0, 60);
+      if (full) messages.push({ role, text: txt.slice(0, 6000) });
+    }
+  }
+  const out = { engine: 'codex', path: file, cwd: cwd || app.getPath('home'),
+    title: title || ('Codex session ' + path.basename(file).slice(-14, -6)),
+    updated: 0, turns };
+  try { out.updated = fs.statSync(file).mtimeMs; } catch {}
+  if (full) out.messages = messages.slice(-120);
+  return out;
+}
+
+function cliSessionFiles() {
+  const out = [];
+  try {
+    for (const proj of fs.readdirSync(CLAUDE_SESS)) {
+      const dir = path.join(CLAUDE_SESS, proj);
+      let ents; try { ents = fs.readdirSync(dir); } catch { continue; }
+      for (const f of ents) if (f.endsWith('.jsonl')) {
+        const fp = path.join(dir, f);
+        try { out.push({ engine: 'claude', path: fp, mtime: fs.statSync(fp).mtimeMs }); } catch {}
+      }
+    }
+  } catch {}
+  const walkCodex = (dir, depth) => {
+    let ents; try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const fp = path.join(dir, e.name);
+      if (e.isDirectory() && depth < 4) walkCodex(fp, depth + 1);
+      else if (e.name.startsWith('rollout-') && e.name.endsWith('.jsonl')) {
+        try { out.push({ engine: 'codex', path: fp, mtime: fs.statSync(fp).mtimeMs }); } catch {}
+      }
+    }
+  };
+  walkCodex(CODEX_SESS, 0);
+  out.sort((a, b) => b.mtime - a.mtime);
+  return out.slice(0, 30);
+}
+
+function cliPathAllowed(fp) {
+  const r1 = path.relative(CLAUDE_SESS, fp), r2 = path.relative(CODEX_SESS, fp);
+  return (!r1.startsWith('..') && !path.isAbsolute(r1)) || (!r2.startsWith('..') && !path.isAbsolute(r2));
+}
+
+ipcMain.handle('cli-sessions', () => {
+  return cliSessionFiles()
+    .map((f) => (f.engine === 'claude' ? parseClaudeCli(f.path, false) : parseCodexCli(f.path, false)))
+    .filter((s) => s && s.turns > 0);
+});
+ipcMain.handle('cli-session-get', (_e, fp) => {
+  if (!cliPathAllowed(fp)) return null;
+  return fs.existsSync(fp) ? (fp.includes('/.claude/') ? parseClaudeCli(fp, true) : parseCodexCli(fp, true)) : null;
+});
+
 // ---- local AI-spend ledger: one number per local day, written on every turn -------
 const spendPath = () => path.join(app.getPath('userData'), 'spend.json');
 function localDay(dt) {

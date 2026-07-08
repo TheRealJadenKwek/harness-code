@@ -78,6 +78,8 @@ contextBridge.exposeInMainWorld('harness', {
   gitPr: (id) => ipcRenderer.invoke('git-pr', id),
   rulesList: () => ipcRenderer.invoke('rules-list'),
   sessionsSearch: (q) => ipcRenderer.invoke('sessions-search', q),
+  cliSessions: () => ipcRenderer.invoke('cli-sessions'),
+  cliSessionGet: (fp) => ipcRenderer.invoke('cli-session-get', fp),
   gitDiscard: (id, file, status) => ipcRenderer.invoke('git-discard', { id, file, status }),
   selfUpdate: () => ipcRenderer.invoke('self-update'),
   appRelaunch: () => ipcRenderer.invoke('app-relaunch'),
