@@ -505,16 +505,18 @@ H.onEvent((e) => {
   const el = logOf(rec); const stick = atBottom(el);
   if (e.type === 'turn_start') { /* keep the current assistant block across tool rounds */ }
   else if (e.type === 'reasoning') {
+    setWorking(rec, 'Thinking…');
     const c = ensureAssistant(rec);
     c.think.style.display = 'block'; c.thinkRaw += e.delta; c.thinkBody.textContent = c.thinkRaw;
     if (stick) c.thinkBody.scrollTop = c.thinkBody.scrollHeight;
   }
   else if (e.type === 'text') {
+    setWorking(rec, 'Writing…');
     const c = ensureAssistant(rec);
     if (c.thinkRaw && !c.raw) { c.think.classList.add('closed'); c.thinkHead.textContent = '✳ thought for a bit'; }
     c.raw += e.delta; renderCurMd(rec);
   }
-  else if (e.type === 'tool_call') { finalizeAssistant(rec); addTool(rec, e.name, e.args); }
+  else if (e.type === 'tool_call') { finalizeAssistant(rec); addTool(rec, e.name, e.args); setWorking(rec, 'Running ' + e.name + '…'); }
   else if (e.type === 'tool_result') {
     if (rec.lastTool) setToolResult(rec.lastTool, e.name, e.result);
     if (S.panel === 'changes' && e.sessionId === S.active && MUTATING.includes(e.name)) {
@@ -523,7 +525,7 @@ H.onEvent((e) => {
   }
   else if (e.type === 'auto_approved') addLine(rec, 'done', '⚡ auto-approved ' + e.kind + ': ' + String(e.detail || '').slice(0, 80));
   else if (e.type === 'control_note') addLine(rec, 'done', e.message);
-  else if (e.type === 'remote_user') { addUser(rec, '📱 ' + e.text); rec.streaming = true; updateComposer(); renderSidebar(); }
+  else if (e.type === 'remote_user') { addUser(rec, '📱 ' + e.text); rec.streaming = true; startWorking(rec); updateComposer(); renderSidebar(); }
   else if (e.type === 'plan') renderPlan(rec, e.items);
   else if (e.type === 'checkpoint') addCkptLine(rec, e.ckptId, e.files);
   else if (e.type === 'snapshot') { /* main-side checkpoint bookkeeping only */ }
@@ -536,7 +538,8 @@ H.onEvent((e) => {
   else if (e.type === 'diff') addDiff(rec, e.file, e.before, e.after);
   else if (e.type === 'done') {
     finalizeAssistant(rec);
-    if (e.usage) addLine(rec, 'done', 'done · ~' + ((e.usage.prompt_tokens || 0) + (e.usage.completion_tokens || 0)).toLocaleString() + ' tokens');
+    const secs = stopWorking(rec);
+    if (e.usage) addLine(rec, 'done', 'done · ~' + ((e.usage.prompt_tokens || 0) + (e.usage.completion_tokens || 0)).toLocaleString() + ' tokens' + (secs ? ' · ' + fmtSecs(secs) : ''));
     endTurn(rec);
   }
   else if (e.type === 'compacted') { finalizeAssistant(rec); addLine(rec, 'done', '✦ context compacted'); endTurn(rec); }
@@ -545,7 +548,38 @@ H.onEvent((e) => {
   if (stick) scrollLog(rec);
 });
 
+// ---- live working indicator: terracotta ✳ + status + elapsed time (Claude-style)
+function startWorking(rec) {
+  if (rec.workEl) return;
+  const el = document.createElement('div');
+  el.className = 'working';
+  el.innerHTML = '<span class="w-star">✳</span><span class="w-text">Thinking…</span><span class="w-time">0s</span>';
+  rec.workStart = Date.now();
+  rec.workEl = el;
+  logOf(rec).appendChild(el);
+  rec.workTimer = setInterval(() => {
+    if (!rec.workEl) return;
+    const s = Math.floor((Date.now() - rec.workStart) / 1000);
+    rec.workEl.querySelector('.w-time').textContent = s < 60 ? s + 's' : Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+  }, 1000);
+  scrollLog(rec);
+}
+function setWorking(rec, text) {
+  if (!rec.workEl) return;
+  rec.workEl.querySelector('.w-text').textContent = text;
+  logOf(rec).appendChild(rec.workEl);   // keep it below the latest content
+}
+function stopWorking(rec) {
+  clearInterval(rec.workTimer);
+  const secs = rec.workStart ? Math.floor((Date.now() - rec.workStart) / 1000) : 0;
+  if (rec.workEl) rec.workEl.remove();
+  rec.workEl = null; rec.workStart = null;
+  return secs;
+}
+function fmtSecs(s) { return s < 60 ? s + 's' : Math.floor(s / 60) + 'm ' + (s % 60) + 's'; }
+
 function endTurn(rec) {
+  stopWorking(rec);
   rec.streaming = false;
   if (rec.meta.id === S.active) updateComposer();
   else { rec.meta.unread = true; H.sessionMeta(rec.meta.id, { unread: true }); }   // finished in the background
@@ -568,7 +602,7 @@ async function sendText(rec, text, images, modelText) {
   }
   rec.streaming = true; rec.cur = null;
   const r = await H.sessionSend(rec.meta.id, text, images && images.length ? images : undefined, modelText);
-  if (r.ok) addUser(rec, text, images ? images.length : 0);
+  if (r.ok) { addUser(rec, text, images ? images.length : 0); startWorking(rec); }
   else if (r.error === 'busy') rec.queued.push({ text, images, modelText });
   else rec.streaming = false;
   updateComposer(); renderSidebar();
@@ -610,7 +644,7 @@ function runSlash(rec, text) {
   if (cmd === '/new') { newChat(); return true; }
   if (cmd === '/clear') { H.sessionClear(rec.meta.id).then(() => { rec.logEl.innerHTML = ''; rec.cur = null; addLine(rec, 'done', 'conversation cleared.'); }); return true; }
   if (cmd === '/compact') {
-    rec.streaming = true; updateComposer(); addLine(rec, 'done', '✦ compacting context…');
+    rec.streaming = true; updateComposer(); addLine(rec, 'done', '✦ compacting context…'); startWorking(rec);
     H.sessionCompact(rec.meta.id).then((r) => { if (!r.ok && r.error) { addLine(rec, 'err', '⚠︎ ' + r.error); endTurn(rec); } });
     return true;
   }

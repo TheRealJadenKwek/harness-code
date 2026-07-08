@@ -346,3 +346,9 @@ h3 { margin: 2px 0 4px; }
 .gf .gf-x { display: none; margin-left: auto; border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 11px; padding: 0 3px; border-radius: 4px; flex: none; }
 .gf:hover .gf-x { display: block; }
 .gf .gf-x:hover { color: var(--red); }
+
+/* live working indicator — terracotta ✳ + elapsed time */
+.working { align-self: flex-start; display: flex; gap: 8px; align-items: baseline; color: var(--muted); font-size: 12.5px; padding: 2px 0; }
+.working .w-star { color: #c96442; display: inline-block; font-size: 15px; line-height: 1; animation: wstar 1.8s ease-in-out infinite; transform-origin: 50% 55%; }
+@keyframes wstar { 0% { transform: rotate(0deg) scale(1); opacity: 1; } 50% { transform: rotate(180deg) scale(.82); opacity: .65; } 100% { transform: rotate(360deg) scale(1); opacity: 1; } }
+.working .w-time { font-family: var(--mono); font-size: 11px; }
