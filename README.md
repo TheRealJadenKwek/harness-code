@@ -28,6 +28,7 @@ Built from scratch (a real agent loop, not a wrapper). Electron GUI + a zero-dep
 - **Model-generated chat titles**, **cross-session search** (sidebar box searches titles + full transcripts), **per-file discard** in the Changes panel.
 - **Hooks** — `~/.harness-code/hooks.json` pre_tool/post_tool commands; a non-zero pre_tool exit vetoes the tool call.
 - **Self-update** — Settings → Check for updates: pulls from GitHub, refreshes the installed app, offers relaunch.
+- **Remote API + iOS bridge** — a localhost, token-gated API (`~/.harness-code/api-token` + `api-port`) lets the [Harness](https://github.com/TheRealJadenKwek/harness) Mac server front this app as a third engine next to the claude/codex CLIs: chats started from the iOS app live inside Harness Code and **stream in the desktop UI in real time** (📱 bubbles), with full continuity both ways.
 - **Message queueing** — type while the agent is working; messages send when the turn ends.
 - **Model picker** (⌘K) — the full OpenRouter catalog (300+), searchable, with pricing and context length, cached for instant open. Type any model id, including ones not in the list.
 - **＋ attach menu** (⌘U) — add photos (sent to vision models as real image input), files (inserted as @mentions), or a folder; jump to slash commands.

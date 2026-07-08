@@ -233,12 +233,15 @@ function foldEvent(rec, e) {
   else if (e.type === 'error') { flushAssistant(rec); rec.transcript.push({ t: 'err', text: e.message }); saveSession(rec); }
   else if (e.type === 'aborted') { flushAssistant(rec); rec.transcript.push({ t: 'note', text: 'stopped.' }); saveSession(rec); }
 }
+const turnListeners = new Map();   // sessionId -> Set<fn> — remote API subscribers
 function onAgentEvent(rec, e) {
   foldEvent(rec, e);
   // the takeover overlay comes down the moment the controlling turn ends
   if ((e.type === 'done' || e.type === 'error' || e.type === 'aborted') &&
       typeof control !== 'undefined' && control && control.rec === rec) endControl();
   sendToUI('agent-event', Object.assign({ sessionId: rec.id }, e));
+  const subs = turnListeners.get(rec.id);
+  if (subs) for (const fn of subs) { try { fn(e); } catch {} }
 }
 
 function ensureAgent(rec) {
@@ -292,6 +295,7 @@ app.whenReady().then(() => {
   loadSessionsFromDisk();
   getModels(false);   // warm the catalog cache in the background
   syncMcpFromConfig();
+  startApiServer();   // remote API for the iOS Harness bridge (localhost, token-gated)
   try { globalShortcut.register('CommandOrControl+Shift+H', doAppshot); } catch {}
   createWindow();
 });
@@ -1113,6 +1117,92 @@ ipcMain.handle('mic-permission', async () => {
   catch { return { granted: true }; }
 });
 
+// ---- remote API: lets the Mac harness server (and through it the iOS Harness app)
+// drive sessions. Localhost-only, token-gated (~/.harness-code/api-token — the same
+// folder the harness server already reads). Because remote turns run through the
+// SAME session records and event bus, they stream live in the desktop UI too.
+const crypto = require('crypto');
+const apiTokenPath = () => path.join(app.getPath('home'), '.harness-code', 'api-token');
+function apiToken() {
+  try { const t = fs.readFileSync(apiTokenPath(), 'utf8').trim(); if (t) return t; } catch {}
+  const t = crypto.randomBytes(24).toString('hex');
+  try { fs.mkdirSync(path.dirname(apiTokenPath()), { recursive: true }); fs.writeFileSync(apiTokenPath(), t, { mode: 0o600 }); } catch {}
+  return t;
+}
+const API_FORWARD = ['text', 'reasoning', 'tool_call', 'tool_result', 'plan', 'auto_approved', 'approval_request', 'control_note', 'done', 'error', 'aborted', 'compacted'];
+function startApiServer() {
+  apiToken();   // materialize the token file so clients can read it before the first request
+  const srv = http.createServer((req, res) => {
+    if ((req.headers['x-hc-token'] || '') !== apiToken()) { res.writeHead(401); return res.end('unauthorized'); }
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 30e6) req.destroy(); });
+    req.on('end', () => {
+      let data = {};
+      try { data = body ? JSON.parse(body) : {}; } catch {}
+      const json = (obj, code) => { res.writeHead(code || 200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+      const u = new URL(req.url, 'http://localhost');
+      const sendMatch = u.pathname.match(/^\/api\/sessions\/([^/]+)\/send$/);
+      if (req.method === 'GET' && u.pathname === '/api/sessions') {
+        return json([...sessions.values()].sort((a, b) => b.updatedAt - a.updatedAt).map(metaOf));
+      }
+      if (req.method === 'GET' && u.pathname === '/api/models') {
+        return json((modelsMem || []).map((m) => ({ value: m.value, label: m.label })));
+      }
+      if (req.method === 'POST' && u.pathname === '/api/sessions') {
+        const cfg = loadConfig();
+        const rec = {
+          id: newId(), title: 'New chat',
+          cwd: data.cwd || cfg.cwd, model: data.model || cfg.model, mode: data.mode || cfg.mode,
+          effort: null, goal: null,
+          createdAt: Date.now(), updatedAt: Date.now(),
+          usage: { prompt_tokens: 0, completion_tokens: 0, cost: 0 },
+          agent: null, savedMessages: [], transcript: [], abort: null, cur: null, checkpoints: [],
+        };
+        sessions.set(rec.id, rec);
+        saveSession(rec);
+        sessionsChanged();
+        return json(metaOf(rec));
+      }
+      if (req.method === 'POST' && sendMatch) {
+        const rec = sessions.get(sendMatch[1]);
+        if (!rec) return json({ error: 'no such session' }, 404);
+        if (rec.abort) return json({ error: 'busy' }, 409);
+        // apply per-turn model/mode overrides from the phone
+        if (data.model && data.model !== rec.model) { rec.model = data.model; if (rec.agent) { rec.agent.setModel(rec.model); rec.agent.textTools = !supportsTools(rec.model); } }
+        if (data.mode && data.mode !== rec.mode) { rec.mode = data.mode; if (rec.agent) rec.agent.setMode(rec.mode); }
+        res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-cache' });
+        let subs = turnListeners.get(rec.id);
+        if (!subs) { subs = new Set(); turnListeners.set(rec.id, subs); }
+        const listener = (e) => {
+          if (!API_FORWARD.includes(e.type)) return;
+          const out = { ...e };
+          if (out.type === 'tool_result' && out.result) out.result = { error: out.result.error, ok: !out.result.error };
+          try { res.write(JSON.stringify(out) + '\n'); } catch {}
+          if (e.type === 'done' || e.type === 'error' || e.type === 'aborted') {
+            subs.delete(listener);
+            try { res.end(); } catch {}
+          }
+        };
+        subs.add(listener);
+        res.on('close', () => subs.delete(listener));   // phone disconnect: turn keeps running
+        const r = beginTurn(rec, { text: String(data.text || ''), images: Array.isArray(data.images) ? data.images : undefined, remote: true });
+        if (!r.ok) { subs.delete(listener); try { res.write(JSON.stringify({ type: 'error', message: r.error }) + '\n'); res.end(); } catch {} }
+        return;
+      }
+      json({ error: 'not found' }, 404);
+    });
+  });
+  // Bind the first free port in the range and publish it for clients (the Mac
+  // harness server reads ~/.harness-code/api-port next to the token).
+  const ports = [8799, 8798, 8797, 8796, 8795];
+  let pi = 0;
+  srv.on('error', () => { if (++pi < ports.length) srv.listen(ports[pi], '127.0.0.1'); });
+  srv.on('listening', () => {
+    try { fs.writeFileSync(path.join(path.dirname(apiTokenPath()), 'api-port'), String(ports[pi])); } catch {}
+  });
+  srv.listen(ports[0], '127.0.0.1');
+}
+
 // ---- local AI-spend ledger: one number per local day, written on every turn -------
 const spendPath = () => path.join(app.getPath('userData'), 'spend.json');
 function localDay(dt) {
@@ -1337,12 +1427,12 @@ ipcMain.handle('session-config', (_e, { id, patch }) => {
   return metaOf(rec);
 });
 
-ipcMain.handle('session-send', (_e, { id, text, images, modelText }) => {
-  const rec = sessions.get(id);
-  if (!rec) return { ok: false, error: 'no such session' };
+// One turn pipeline shared by the renderer (IPC) and the remote API (iOS harness).
+// `remote` additionally mirrors the user bubble into the desktop UI.
+function beginTurn(rec, { text, images, modelText, remote }) {
   const cfg = loadConfig();
   if (!cfg.apiKey) {
-    sendToUI('agent-event', { sessionId: id, type: 'error', message: 'No OpenRouter API key set — open Settings.' });
+    sendToUI('agent-event', { sessionId: rec.id, type: 'error', message: 'No OpenRouter API key set — open Settings.' });
     return { ok: false, error: 'no key' };
   }
   if (rec.abort) return { ok: false, error: 'busy' };
@@ -1350,7 +1440,8 @@ ipcMain.handle('session-send', (_e, { id, text, images, modelText }) => {
     rec.title = text.split('\n')[0].slice(0, 48) || 'New chat';
     sessionsChanged();
   }
-  rec.transcript.push({ t: 'user', text, images: images && images.length ? images.length : 0 });
+  rec.transcript.push({ t: 'user', text, images: images && images.length ? images.length : 0, remote: !!remote });
+  if (remote) sendToUI('agent-event', { sessionId: rec.id, type: 'remote_user', text });
   rec.updatedAt = Date.now();
   const agent = ensureAgent(rec);
   rec.abort = new AbortController();
@@ -1384,6 +1475,12 @@ ipcMain.handle('session-send', (_e, { id, text, images, modelText }) => {
     }
   })();
   return { ok: true };
+}
+
+ipcMain.handle('session-send', (_e, { id, text, images, modelText }) => {
+  const rec = sessions.get(id);
+  if (!rec) return { ok: false, error: 'no such session' };
+  return beginTurn(rec, { text, images, modelText });
 });
 
 // Rewind: restore every file a turn touched to its pre-turn contents.

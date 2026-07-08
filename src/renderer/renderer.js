@@ -193,7 +193,7 @@ function addCkptLine(rec, ckptId, files) {
 }
 
 function renderItem(rec, item) {
-  if (item.t === 'user') addUser(rec, (item.steered ? '↳ ' : '') + item.text, item.images);
+  if (item.t === 'user') addUser(rec, (item.remote ? '📱 ' : '') + (item.steered ? '↳ ' : '') + item.text, item.images);
   else if (item.t === 'plan') { renderPlan(rec, item.items); rec.planEl = null; }
   else if (item.t === 'ckpt') addCkptLine(rec, item.id, item.files);
   else if (item.t === 'assistant') {
@@ -466,6 +466,7 @@ H.onEvent((e) => {
   }
   else if (e.type === 'auto_approved') addLine(rec, 'done', '⚡ auto-approved ' + e.kind + ': ' + String(e.detail || '').slice(0, 80));
   else if (e.type === 'control_note') addLine(rec, 'done', e.message);
+  else if (e.type === 'remote_user') { addUser(rec, '📱 ' + e.text); rec.streaming = true; updateComposer(); renderSidebar(); }
   else if (e.type === 'plan') renderPlan(rec, e.items);
   else if (e.type === 'checkpoint') addCkptLine(rec, e.ckptId, e.files);
   else if (e.type === 'snapshot') { /* main-side checkpoint bookkeeping only */ }
