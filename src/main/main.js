@@ -1482,13 +1482,18 @@ ipcMain.handle('credits', () => getCredits());
 // ---- attach files/photos from the + menu ------------------------------------------
 const IMG_EXT = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
 const IMG_MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
-ipcMain.handle('pick-files', async (_e, id) => {
+ipcMain.handle('pick-files', async (_e, arg) => {
+  const { id, vision } = typeof arg === 'object' && arg !== null ? arg : { id: arg, vision: true };
   const rec = sessions.get(id);
-  const r = await dialog.showOpenDialog(win, { properties: ['openFile', 'multiSelections'] });
+  const r = await dialog.showOpenDialog(win, {
+    properties: ['openFile', 'multiSelections'],
+    ...(vision === false ? { message: 'This model can\'t see images — image files will be skipped (text files are fine).' } : {}),
+  });
   if (r.canceled) return [];
   return r.filePaths.slice(0, 8).map((p) => {
     const ext = path.extname(p).toLowerCase();
     if (IMG_EXT.includes(ext)) {
+      if (vision === false) return { kind: 'error', name: path.basename(p), error: 'skipped — this model can\'t see images' };
       try {
         const buf = fs.readFileSync(p);
         if (buf.length <= 6 * 1024 * 1024) {

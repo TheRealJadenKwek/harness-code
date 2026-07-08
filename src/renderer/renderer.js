@@ -960,6 +960,11 @@ async function setSessionConfig(patch) {
   const rec = active(); if (!rec) return;
   const m = await H.sessionConfig(rec.meta.id, patch);
   if (m) rec.meta = m;
+  if (patch.model && !visionOk(rec) && (rec.attachments || []).some((a) => a.dataUrl)) {
+    rec.attachments = rec.attachments.filter((a) => !a.dataUrl);
+    renderAttachRow();
+    addLine(rec, 'done', '🖼 image attachments removed — ' + shortModel(rec.meta.model) + ' can\'t see images');
+  }
   updateTitlebar(); renderSidebar();
 }
 const MODE_CYCLE = { plan: 'ask', ask: 'edits', edits: 'auto', auto: 'bypass', bypass: 'plan' };
@@ -1027,7 +1032,7 @@ function visionOk(rec) {
 }
 async function attachFiles() {
   const rec = active(); if (!rec) return;
-  const picked = await H.pickFiles(rec.meta.id);
+  const picked = await H.pickFiles(rec.meta.id, visionOk(rec));
   rec.attachments = rec.attachments || [];
   for (const f of picked) {
     if (f.kind === 'image') { if (!visionOk(rec)) { addLine(rec, 'err', '⚠︎ ' + shortModel(rec.meta.model) + ' can\'t see images — pick a vision model (🖼 in the picker)'); continue; } rec.attachments.push({ name: f.name, dataUrl: f.dataUrl }); }
@@ -1052,7 +1057,8 @@ async function renderPlusMenu(view) {
   };
   const sep = () => { const d = document.createElement('div'); d.className = 'menu-sep'; box.appendChild(d); };
   if (view === 'root') {
-    item('📎 Add files or photos <span class="mi-hint">⌘U</span>', () => { hideMenus(); attachFiles(); });
+    const va = visionOk(active());
+    item('📎 Add files' + (va ? ' or photos' : '') + ' <span class="mi-hint">⌘U</span>' + (va ? '' : ' <span class="mi-hint">(no images — model can\'t see them)</span>'), () => { hideMenus(); attachFiles(); });
     item('📁 Add folder', async () => {
       hideMenus();
       const rec = active(); if (!rec) return;

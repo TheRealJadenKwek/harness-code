@@ -69,7 +69,7 @@ contextBridge.exposeInMainWorld('harness', {
   // usage + attachments
   credits: () => ipcRenderer.invoke('credits'),
   spendSummary: () => ipcRenderer.invoke('spend-summary'),
-  pickFiles: (id) => ipcRenderer.invoke('pick-files', id),
+  pickFiles: (id, vision) => ipcRenderer.invoke('pick-files', { id, vision }),
   pickFolderPath: (id) => ipcRenderer.invoke('pick-folder-path', id),
 
   // files panel + open-in
