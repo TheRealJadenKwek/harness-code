@@ -142,22 +142,43 @@ function fetchModels(apiKey) {
   });
 }
 const LOCAL_URL = 'http://localhost:11434';   // Ollama default
+const localCaps = new Map();   // model name → capabilities[] (Ollama /api/show)
+function ollamaShow(name) {
+  if (localCaps.has(name)) return Promise.resolve(localCaps.get(name));
+  return new Promise((resolve) => {
+    const req = require('http').request(LOCAL_URL + '/api/show', { method: 'POST', timeout: 1500 }, (res) => {
+      let b = '';
+      res.on('data', (c) => (b += c));
+      res.on('end', () => {
+        try { const caps = JSON.parse(b).capabilities || []; localCaps.set(name, caps); resolve(caps); }
+        catch { resolve([]); }
+      });
+    });
+    req.on('error', () => resolve([]));
+    req.on('timeout', () => { req.destroy(); resolve([]); });
+    req.end(JSON.stringify({ model: name }));
+  });
+}
 function fetchLocalModels() {
   return new Promise((resolve) => {
     const req = require('http').get(LOCAL_URL + '/api/tags', { timeout: 800 }, (res) => {
       let b = '';
       res.on('data', (c) => (b += c));
-      res.on('end', () => {
+      res.on('end', async () => {
         try {
-          resolve((JSON.parse(b).models || []).map((m) => ({
-            value: 'local/' + m.name,
-            label: m.name.replace(/^hf\.co\//, '').replace(/:latest$/, '') + ' · local',
-            context: 32768,
-            pricing: { prompt: 0, completion: 0 },
-            reasoning: false,
-            tools: false,          // tiny local models → ReAct text-tool fallback
-            vision: /(-v|vl|vision)\b|minicpm-v|-o\d/i.test(m.name),
-            local: true,
+          const models = JSON.parse(b).models || [];
+          resolve(await Promise.all(models.map(async (m) => {
+            const caps = await ollamaShow(m.name);   // native tools/vision/thinking per model
+            return {
+              value: 'local/' + m.name,
+              label: m.name.replace(/^hf\.co\//, '').replace(/:latest$/, '') + ' · local',
+              context: 32768,
+              pricing: { prompt: 0, completion: 0 },
+              reasoning: false,                      // Ollama thinks natively; no effort knob
+              tools: caps.includes('tools'),
+              vision: caps.includes('vision'),
+              local: true,
+            };
           })));
         } catch { resolve([]); }
       });
