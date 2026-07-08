@@ -1683,21 +1683,56 @@ ipcMain.handle('session-config', (_e, { id, patch }) => {
   return metaOf(rec);
 });
 
+// Goal driver: chat-era models (gpt-4o and older) end their turn after a step
+// or two no matter what the system prompt says. When a standing goal is set,
+// re-prompt automatically until the model says GOAL COMPLETE — bounded, and a
+// manual stop or a real user message resets the loop.
+const GOAL_MAX_AUTO = 10;
+function maybeGoalContinue(rec, wasAborted, errored) {
+  if (!rec.goal) return;
+  if (wasAborted || errored) { rec.goalAuto = 0; return; }
+  let last = null;
+  for (let i = rec.transcript.length - 1; i >= 0; i--) if (rec.transcript[i].t === 'assistant') { last = rec.transcript[i]; break; }
+  if (/GOAL[\s_-]?COMPLETE/i.test((last && last.text) || '')) {
+    if (rec.goalAuto) {
+      rec.transcript.push({ t: 'note', text: '🎯 goal reported complete after ' + rec.goalAuto + ' auto-continue' + (rec.goalAuto > 1 ? 's' : '') });
+      sendToUI('agent-event', { sessionId: rec.id, type: 'control_note', message: '🎯 goal reported complete' });
+    }
+    rec.goalAuto = 0; return;
+  }
+  rec.goalAuto = rec.goalAuto || 0;
+  if (rec.goalAuto >= GOAL_MAX_AUTO) {
+    rec.transcript.push({ t: 'note', text: '🎯 goal driver paused after ' + GOAL_MAX_AUTO + ' auto-continues — send any message to resume' });
+    sendToUI('agent-event', { sessionId: rec.id, type: 'control_note', message: '🎯 goal driver paused after ' + GOAL_MAX_AUTO + ' auto-continues' });
+    rec.goalAuto = 0; saveSession(rec); return;
+  }
+  rec.goalAuto++;
+  setTimeout(() => {
+    if (!sessions.has(rec.id) || rec.abort || !rec.goal) return;
+    beginTurn(rec, {
+      text: 'Continue working toward the standing goal (auto-continue ' + rec.goalAuto + '/' + GOAL_MAX_AUTO + '). If it is now fully achieved and verified, reply with GOAL COMPLETE; otherwise take the next concrete step now.',
+      goalAuto: true,
+    });
+  }, 500);
+}
+
 // One turn pipeline shared by the renderer (IPC) and the remote API (iOS harness).
 // `remote` additionally mirrors the user bubble into the desktop UI.
-function beginTurn(rec, { text, images, modelText, remote }) {
+function beginTurn(rec, { text, images, modelText, remote, goalAuto }) {
   const cfg = loadConfig();
   if (!cfg.apiKey) {
     sendToUI('agent-event', { sessionId: rec.id, type: 'error', message: 'No OpenRouter API key set — open Settings.' });
     return { ok: false, error: 'no key' };
   }
   if (rec.abort) return { ok: false, error: 'busy' };
-  if (rec.title === 'New chat') {
+  if (!goalAuto) rec.goalAuto = 0;   // a real user message resets the driver's budget
+  if (!goalAuto && rec.title === 'New chat') {
     rec.title = text.split('\n')[0].slice(0, 48) || 'New chat';
     sessionsChanged();
   }
-  rec.transcript.push({ t: 'user', text, ts: Date.now(), images: images && images.length ? images.length : 0, remote: !!remote });
+  rec.transcript.push({ t: 'user', text, ts: Date.now(), images: images && images.length ? images.length : 0, remote: !!remote, auto: !!goalAuto });
   if (remote) sendToUI('agent-event', { sessionId: rec.id, type: 'remote_user', text });
+  if (goalAuto) sendToUI('agent-event', { sessionId: rec.id, type: 'auto_user', text, n: rec.goalAuto, max: GOAL_MAX_AUTO });
   rec.updatedAt = Date.now();
   const agent = ensureAgent(rec);
   const convo = rec.transcript.filter((i) => i.t === 'user' || i.t === 'assistant').length;
@@ -1723,7 +1758,7 @@ function beginTurn(rec, { text, images, modelText, remote }) {
       }
       await agent.send(payload, rec.abort.signal);
     }
-    catch (err) { onAgentEvent(rec, { type: 'error', message: String((err && err.message) || err) }); }
+    catch (err) { rec.turnErrored = true; onAgentEvent(rec, { type: 'error', message: String((err && err.message) || err) }); }
     finally {
       // finalize the turn's checkpoint if any files were touched
       if (rec.curCkpt && Object.keys(rec.curCkpt.files).length) {
@@ -1733,7 +1768,10 @@ function beginTurn(rec, { text, images, modelText, remote }) {
         sendToUI('agent-event', { sessionId: rec.id, type: 'checkpoint', ckptId: rec.curCkpt.id, files: Object.keys(rec.curCkpt.files).length });
       }
       rec.curCkpt = null;
+      const wasAborted = !!(rec.abort && rec.abort.signal.aborted);
+      const errored = !!rec.turnErrored; rec.turnErrored = false;
       rec.abort = null; saveSession(rec); sessionsChanged();
+      maybeGoalContinue(rec, wasAborted, errored);
     }
   })();
   return { ok: true };

@@ -66,7 +66,7 @@ class Session {
     return {
       role: 'system',
       content: systemPrompt(this.cwd, this.mode) +
-        (this.goal ? '\n\nSTANDING GOAL from the user (keep working toward it across turns): ' + this.goal : ''),
+        (this.goal ? '\n\nSTANDING GOAL from the user (keep working toward it across turns): ' + this.goal + '\nWhen the goal is FULLY achieved and verified, include the exact phrase GOAL COMPLETE in your reply. Until then, keep making concrete progress each turn — do not stop to ask permission for routine steps.' : ''),
     };
   }
 
