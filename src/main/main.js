@@ -172,7 +172,7 @@ function fetchLocalModels() {
             return {
               value: 'local/' + m.name,
               label: m.name.replace(/^hf\.co\//, '').replace(/:latest$/, '') + ' · local',
-              context: 32768,
+              context: 16384,   // matches OLLAMA_CONTEXT_LENGTH in the brew service plist
               pricing: { prompt: 0, completion: 0 },
               reasoning: false,                      // Ollama thinks natively; no effort knob
               tools: caps.includes('tools'),
